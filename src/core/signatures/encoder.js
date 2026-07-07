@@ -6,40 +6,41 @@
 // Port of core/signatures/encoder.cpp — encode the Word tokens of a token
 // stream into 3F signatures.
 //
-// A 3F signature is a sparse sorted set of "on" bit indices over dimension
-// 3*F, laid out as three F-wide bands:
+// A signature is a LIST OF BANDS: `TypedArray[]`, each band a sparse sorted set
+// of local part ids in [0, F). The three bands of a full signature are:
 //
-//   [0,  F)  before  (L) — OR of the current bags of the left context words
-//   [F, 2F)  current (C) — this word's Option B bag (see wordEncoder.js)
-//   [2F,3F)  after   (R) — OR of the current bags of the right context words
+//   L (before)  — OR of the current bags of the left context words
+//   C (current) — this word's Option B bag (see wordEncoder.js)
+//   R (after)   — OR of the current bags of the right context words
+//
+// Bands are always local ([0,F)), so the element type keys on F via
+// `sparseArrayType(F)` (Uint16Array while F <= 65536, else Uint32Array). This
+// holds uniformly for 1-band, 2-band, and 3-band signatures — a small or a
+// large dictionary keeps 2 bytes/id.
 //
 //   encode          — L / R pool over the whole [start,end) scope
 //   encodeWindowed  — L / R pool over a bounded window of `radius` words each
-//                     side (spec v3.1 Pass-1 §8). radius 0 => empty L/R.
+//                     side (spec v3.1 Pass-1 §8). radius 0 => empty L / R.
 //
-// Representation: each signature is a TypedArray of ascending global bit
-// indices (sparse). Element type is chosen from the dimension by
-// `sparseArrayType`: Uint16Array when the largest index fits (dim <= 65536),
-// else Uint32Array — so a small dictionary stays 2 bytes/id and a large one
-// (3F > 65536) is safely widened.
-//
-// Band views (`toLCR`, `toLR`, `toLunionC`, `toLC`) remap a 3F signature into
-// the reduced inputs used by the models; they mirror apps/tree_parts_common's
-// tp_data band selection, not a separate encoder.
+// Band selectors return reduced banded signatures; `flatten` is the ONE place
+// bands are concatenated into a single global-indexed vector, and the ONE
+// place the total dimension (nBands*F) — not F — drives the element type:
+//   lcr (3F [L,C,R]), lr (2F [L|R], BERT), lc (2F [L|C] control),
+//   lUnionC (F [L∪C], GPT); flatten(bands, F) -> one TypedArray.
 // ============================================================================
 
 import { StreamTokenType, asciiLowercase } from "../parts/tokenize.js";
+import { sparseArrayType } from "../../utilities/sparseArrayType.js";
 import { encodeWord } from "./wordEncoder.js";
 
 /**
- * Sparse element type for a signature of the given dimension: the largest bit
- * index is dim-1, so Uint16 suffices iff dim <= 65536.
- * @param {number} dim number of bit positions (e.g. 3F, 2F, or F).
- * @returns {Uint16ArrayConstructor|Uint32ArrayConstructor}
+ * A signature is an array of bands, each a sparse sorted TypedArray of local
+ * ids in [0, F). A full signature is [L, C, R]; reduced views have 1 or 2 bands.
+ * @typedef {Array<Uint16Array|Uint32Array>} Signature
  */
-export const sparseArrayType = (dim) => (dim <= 0x10000 ? Uint16Array : Uint32Array);
 
-// Union of two ascending, de-duplicated id arrays (two-pointer merge).
+// Union of two ascending, de-duplicated id sequences (two-pointer merge).
+// Accepts arrays or TypedArrays; returns a plain Array.
 const mergeUnion = (a, b) => {
   const out = [];
   let i = 0;
@@ -65,27 +66,18 @@ const unionRange = (bags, lo, hi) => {
   return acc;
 };
 
-// Assemble one 3F signature from its three (already-sorted, disjoint-range)
-// bands. Concatenation is globally sorted: before < F <= current < 2F <= after.
-const assemble = (Arr, F, before, current, after) => {
-  const sig = new Arr(before.length + current.length + after.length);
-  let k = 0;
-  for (let t = 0; t < before.length; t++) sig[k++] = before[t]; // [0,F)
-  for (let t = 0; t < current.length; t++) sig[k++] = F + current[t]; // [F,2F)
-  for (let t = 0; t < after.length; t++) sig[k++] = 2 * F + after[t]; // [2F,3F)
-  return sig;
-};
-
-// Shared setup: the Word-token indices in [start,end) and their Option B bags.
+// Shared setup: the Option B bags (local id arrays) for the Word tokens in
+// [start,end).
 const prepare = (dict, tokens, start, end) => {
   const n = tokens.length;
   if (end > n) end = n;
-  const wordIdx = [];
+  const bags = [];
   for (let i = start; i < end; i++) {
-    if (tokens[i].type === StreamTokenType.Word) wordIdx.push(i);
+    if (tokens[i].type === StreamTokenType.Word) {
+      bags.push(encodeWord(dict, asciiLowercase(tokens[i].value)));
+    }
   }
-  const current = wordIdx.map((wi) => encodeWord(dict, asciiLowercase(tokens[wi].value)));
-  return current;
+  return bags;
 };
 
 /**
@@ -95,11 +87,10 @@ const prepare = (dict, tokens, start, end) => {
  * @param {Array<{type: number, value: string}>} tokens
  * @param {number} [start=0]
  * @param {number} [end=Infinity] clamped to tokens.length.
- * @returns {Array<Uint16Array|Uint32Array>} one signature per Word token.
+ * @returns {Signature[]} one [L, C, R] signature per Word token.
  */
 export const encode = (dict, tokens, start = 0, end = Infinity) => {
-  const F = dict.size();
-  const Arr = sparseArrayType(3 * F);
+  const Arr = sparseArrayType(dict.size());
   const current = prepare(dict, tokens, start, end);
   const N = current.length;
   const out = new Array(N);
@@ -115,7 +106,7 @@ export const encode = (dict, tokens, start = 0, end = Infinity) => {
   // Forward: before[i] = union(current[0..i)).
   let accL = [];
   for (let i = 0; i < N; i++) {
-    out[i] = assemble(Arr, F, accL, current[i], after[i]);
+    out[i] = [Arr.from(accL), Arr.from(current[i]), Arr.from(after[i])];
     accL = mergeUnion(accL, current[i]);
   }
   return out;
@@ -129,78 +120,66 @@ export const encode = (dict, tokens, start = 0, end = Infinity) => {
  * @param {number} radius window reach each side (0 => empty L/R bands).
  * @param {number} [start=0]
  * @param {number} [end=Infinity] clamped to tokens.length.
- * @returns {Array<Uint16Array|Uint32Array>} one signature per Word token.
+ * @returns {Signature[]} one [L, C, R] signature per Word token.
  */
 export const encodeWindowed = (dict, tokens, radius, start = 0, end = Infinity) => {
-  const F = dict.size();
-  const Arr = sparseArrayType(3 * F);
+  const Arr = sparseArrayType(dict.size());
   const current = prepare(dict, tokens, start, end);
   const N = current.length;
   const out = new Array(N);
   for (let i = 0; i < N; i++) {
     const lo = i > radius ? i - radius : 0;
     const hi = Math.min(N, i + radius + 1);
-    out[i] = assemble(Arr, F, unionRange(current, lo, i), current[i], unionRange(current, i + 1, hi));
+    out[i] = [
+      Arr.from(unionRange(current, lo, i)),
+      Arr.from(current[i]),
+      Arr.from(unionRange(current, i + 1, hi)),
+    ];
   }
   return out;
 };
 
-// ---- Band views over a 3F signature -------------------------------------
+// ---- Band selectors (return reduced banded signatures) -------------------
+// Each returns a Signature (TypedArray[]); bands stay local and F-typed.
+
+/** 3F [L, C, R] — the full signature (returns the same three bands). */
+export const lcr = (sig) => [sig[0], sig[1], sig[2]];
+
+/** 2F [L | R] — drop the current band (the BERT input). */
+export const lr = (sig) => [sig[0], sig[2]];
+
+/** 2F [L | C] — drop the after band (the band-C control). */
+export const lc = (sig) => [sig[0], sig[1]];
 
 /**
- * Identity view: a 3F signature is already [L, C, R]. Returns a copy.
- * @param {Uint16Array|Uint32Array} sig
- * @returns {Uint16Array|Uint32Array}
+ * F [L ∪ C] — union the L and C bands into one F-wide band (the GPT input).
+ * Creates a new band, so it types it via sparseArrayType(F) like `encode`.
+ * @param {Signature} sig
+ * @param {number} F dictionary size (band width).
+ * @returns {Signature} a single-band signature.
  */
-export const toLCR = (sig) => sig.slice();
+export const lUnionC = (sig, F) => [sparseArrayType(F).from(mergeUnion(sig[0], sig[1]))];
 
 /**
- * F-dim [L ∪ C]: union the before band and the current band into one F-wide
- * bag (the GPT input). Drops R.
- * @param {Uint16Array|Uint32Array} sig 3F signature.
- * @param {number} F dictionary size.
- * @returns {Uint16Array|Uint32Array} sorted ids in [0,F).
+ * Concatenate a banded signature into one global-indexed sparse vector: band k
+ * is shifted by k*F. This is the single place the TOTAL dimension (nBands*F),
+ * not F, drives the element type — so a 2F/3F flat may widen to Uint32 even
+ * when the bands are Uint16.
+ * @param {Signature} bands one or more F-wide bands (e.g. from lcr/lr/lc/lUnionC).
+ * @param {number} F dictionary size (band width).
+ * @returns {Uint16Array|Uint32Array} sorted ids in [0, bands.length*F).
  */
-export const toLunionC = (sig, F) => {
-  const before = [];
-  const curr = [];
-  for (let i = 0; i < sig.length; i++) {
-    const b = sig[i];
-    if (b < F) before.push(b);
-    else if (b < 2 * F) curr.push(b - F);
-    else break; // after band — sorted, so we're done
+export const flatten = (bands, F) => {
+  let total = 0;
+  for (const b of bands) total += b.length;
+  const out = new (sparseArrayType(bands.length * F))(total);
+  let k = 0;
+  for (let band = 0; band < bands.length; band++) {
+    const off = band * F;
+    const b = bands[band];
+    for (let i = 0; i < b.length; i++) out[k++] = off + b[i];
   }
-  return sparseArrayType(F).from(mergeUnion(before, curr));
-};
-
-/**
- * 2F-dim [L | R]: before band in [0,F) and after band remapped to [F,2F) (the
- * BERT input). Drops C.
- * @param {Uint16Array|Uint32Array} sig 3F signature.
- * @param {number} F dictionary size.
- * @returns {Uint16Array|Uint32Array} sorted ids in [0,2F).
- */
-export const toLR = (sig, F) => {
-  const res = [];
-  for (let i = 0; i < sig.length; i++) if (sig[i] < F) res.push(sig[i]); // L -> [0,F)
-  for (let i = 0; i < sig.length; i++) if (sig[i] >= 2 * F) res.push(sig[i] - F); // R -> [F,2F)
-  return sparseArrayType(2 * F).from(res);
-};
-
-/**
- * 2F-dim [L | C]: before band and current band kept in place (the GPT band-C
- * control). Drops R.
- * @param {Uint16Array|Uint32Array} sig 3F signature.
- * @param {number} F dictionary size.
- * @returns {Uint16Array|Uint32Array} sorted ids in [0,2F).
- */
-export const toLC = (sig, F) => {
-  const res = [];
-  for (let i = 0; i < sig.length; i++) {
-    if (sig[i] < 2 * F) res.push(sig[i]);
-    else break;
-  }
-  return sparseArrayType(2 * F).from(res);
+  return out;
 };
 
 export default encode;
