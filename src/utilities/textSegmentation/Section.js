@@ -123,6 +123,7 @@ export class Section extends Array {
   get content() {
     const h = this[0]?.hasOwnProperty("level") || this[0]?.constructor.isHeader;
     return h && Object.defineProperty(this.slice(1), "header", {
+      // Body slice is header-less by definition: its `.header` always reads null.
       get() { return null; }
     }) || this;
   }
@@ -374,6 +375,22 @@ export class Section extends Array {
    */
   contentSections() {
     const out = [];
+    /**
+     * @description Depth-first walker that accumulates content chunks onto the
+     * enclosing `out` array. For each `Section` node it emits the node's direct
+     * content (when non-empty), attaching the ancestor header chain, any
+     * inherited header (for headerless content), and — inside a multi-paragraph
+     * parent — the paragraph index. Recurses into child sections, extending the
+     * ancestor chain at each header boundary.
+     * @param {Section} node - Current subtree root; non-Section nodes are skipped.
+     * @param {Header[]} ancestors - Header chain from the root down to `node`.
+     * @param {Header|undefined} inheritedHeader - Nearest enclosing header for
+     *   headerless content, or `undefined`.
+     * @param {number|undefined} paragraphIndex - Ordinal of this node among its
+     *   parent's paragraph children when the parent holds more than one, else
+     *   `undefined`.
+     * @returns {void} Results are pushed onto the enclosing `out` array.
+     */
     const walk = (node, ancestors, inheritedHeader, paragraphIndex) => {
       if (!(node instanceof Section)) return;
 

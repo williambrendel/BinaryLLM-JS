@@ -81,7 +81,19 @@ export class Header extends Segment {
     return `Header [${this.start}, ${this.end}]`;
   }
 
-  extractTitle(text) { 
+  /**
+   * @method extractTitle
+   * @description Extracts the heading's clean title text from the source
+   * string. Skips the leading marker (`#titleOffset` characters past the
+   * segment start, e.g. past `"## "` for an ATX heading) and strips any
+   * surrounding `#` characters and whitespace via {@link TRIM_HEADING_RE}.
+   * @param {string} text - The original source text this header indexes into.
+   * @returns {string} The heading title with markers and padding removed.
+   * @example
+   *   // For a header parsed from the line "## Methods":
+   *   header.extractTitle(text);   // → "Methods"
+   */
+  extractTitle(text) {
     return text.slice(this.start + this.#titleOffset, this.end).replace(TRIM_HEADING_RE, "");
   }
 }

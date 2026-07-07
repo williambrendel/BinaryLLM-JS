@@ -60,20 +60,76 @@ const DASH = 45; // -
 const DOT = 46; // .
 
 // ---- Character classification (ASCII-only by design) ---------------------
+
+/**
+ * @description Test whether a byte code is an ASCII letter (`A`–`Z` or `a`–`z`).
+ * @param {number} c - Byte code to test.
+ * @returns {boolean} `true` if `c` is an ASCII letter.
+ */
 const isLetter = (c) => (c >= 97 && c <= 122) || (c >= 65 && c <= 90);
+
+/**
+ * @description Test whether a byte code is an ASCII decimal digit (`0`–`9`).
+ * @param {number} c - Byte code to test.
+ * @returns {boolean} `true` if `c` is an ASCII digit.
+ */
 const isDigit = (c) => c >= 48 && c <= 57;
+
+/**
+ * @description Test whether a byte code is a word character (ASCII letter or digit).
+ * @param {number} c - Byte code to test.
+ * @returns {boolean} `true` if `c` is a letter or digit.
+ */
 const isWordChar = (c) => isLetter(c) || isDigit(c);
+
+/**
+ * @description Test whether a byte code is a space (`SP`, 0x20).
+ * @param {number} c - Byte code to test.
+ * @returns {boolean} `true` if `c` is a space.
+ */
 const isSpace = (c) => c === SP;
+
+/**
+ * @description Test whether a byte code is a horizontal tab (`TAB`, 0x09).
+ * @param {number} c - Byte code to test.
+ * @returns {boolean} `true` if `c` is a tab.
+ */
 const isTab = (c) => c === TAB;
+
+/**
+ * @description Test whether a byte code is a newline byte (`LF` or `CR`).
+ * @param {number} c - Byte code to test.
+ * @returns {boolean} `true` if `c` is `LF` (0x0A) or `CR` (0x0D).
+ */
 const isNewline = (c) => c === LF || c === CR;
+
+/**
+ * @description Test whether a byte code is any whitespace (space, tab, or newline).
+ * @param {number} c - Byte code to test.
+ * @returns {boolean} `true` if `c` is a space, tab, `LF`, or `CR`.
+ */
 const isWhitespace = (c) => isSpace(c) || isTab(c) || isNewline(c);
 
+/**
+ * @description Lowercase a single ASCII byte code: uppercase letters (`A`–`Z`)
+ * are shifted by 32; all other byte codes are returned unchanged.
+ * @param {number} c - Byte code to lowercase.
+ * @returns {number} The lowercased byte code, or `c` if it is not `A`–`Z`.
+ */
 const toLowerAscii = (c) => (c >= 65 && c <= 90 ? c + 32 : c);
 
 const CAT_WORD = 0;
 const CAT_WHITESPACE = 1;
 const CAT_PUNCTUATION = 2;
 
+/**
+ * @description Classify a byte code into one of the three tokenizer categories.
+ * Word characters (letters/digits) yield `CAT_WORD`, whitespace bytes yield
+ * `CAT_WHITESPACE`, and everything else (including non-ASCII bytes) falls
+ * through to `CAT_PUNCTUATION`.
+ * @param {number} c - Byte code to classify.
+ * @returns {number} `CAT_WORD`, `CAT_WHITESPACE`, or `CAT_PUNCTUATION`.
+ */
 const classify = (c) => {
   if (isWordChar(c)) return CAT_WORD;
   if (isWhitespace(c)) return CAT_WHITESPACE;
@@ -100,9 +156,25 @@ export const asciiLowercase = (s) => {
   return out;
 };
 
-// Number of leading sign/currency prefix chars at position p that begin a
-// numeric literal ([+-]?\$? immediately followed by a digit, and not itself
-// preceded by an alphanumeric). 0 means "not a number prefix here".
+/**
+ * @description Compute the length of the sign/currency prefix that begins a
+ * numeric literal at position `p`. A prefix is an optional leading `-`/`+`
+ * followed by an optional `$`, matching `[+-]?\$?`, that is immediately
+ * followed by a digit and is not itself preceded by a word character. The
+ * return value is the number of prefix bytes (0, 1, or 2); `0` means there is
+ * no number prefix at `p`.
+ *
+ * @param {string} raw - Byte-string being scanned.
+ * @param {number} p - Index at which to test for a number prefix.
+ * @returns {number} Count of leading prefix bytes (`0`–`2`); `0` when `p` does
+ *   not start a numeric literal.
+ *
+ * @example
+ * numberPrefixLen("$3", 0)     // → 1   ("$" before a digit)
+ * numberPrefixLen("-$5", 0)    // → 2   ("-$" before a digit)
+ * numberPrefixLen("a-3", 1)    // → 0   (preceded by word char "a")
+ * numberPrefixLen("+x", 0)     // → 0   (no digit follows)
+ */
 const numberPrefixLen = (raw, p) => {
   const n = raw.length;
   if (p >= n) return 0;
@@ -117,6 +189,24 @@ const numberPrefixLen = (raw, p) => {
   return 0;
 };
 
+/**
+ * @description Normalize a maximal whitespace run into a single canonical
+ * delimiter value. Only `LF` bytes count as newlines (`CR` bytes are ignored);
+ * spaces and tabs count as "other" whitespace. The result is chosen by
+ * priority: two or more newlines collapse to `"\n\n"` (paragraph break), a
+ * single newline to `"\n"`, a lone single space to `" "`, and anything else
+ * (tabs, multiple spaces, mixed space/tab runs) to `"\t"`.
+ *
+ * @param {string} run - Byte-string containing only whitespace bytes.
+ * @returns {string} The normalized delimiter: `""`, `"\n\n"`, `"\n"`, `" "`,
+ *   or `"\t"`.
+ *
+ * @example
+ * classifyWhitespaceRun(" ")        // → " "
+ * classifyWhitespaceRun("   ")      // → "\t"   (more than one space)
+ * classifyWhitespaceRun("\n\n\n")   // → "\n\n" (two or more newlines)
+ * classifyWhitespaceRun("\n")       // → "\n"
+ */
 const classifyWhitespaceRun = (run) => {
   if (run.length === 0) return "";
   let newlines = 0;
@@ -134,6 +224,21 @@ const classifyWhitespaceRun = (run) => {
   return "\t";
 };
 
+/**
+ * @description Normalize a maximal punctuation run into a canonical delimiter
+ * value. A run of three or more `.` bytes collapses to an ellipsis `"..."`; a
+ * run of two or more `-` bytes collapses to an em-dash `"--"`. Any other run
+ * (including mixed punctuation) is returned unchanged.
+ *
+ * @param {string} run - Byte-string containing the punctuation run.
+ * @returns {string} `"..."` for all-dot runs of length ≥ 3, `"--"` for
+ *   all-dash runs of length ≥ 2, otherwise `run` itself (`""` if empty).
+ *
+ * @example
+ * classifyPunctuationRun("....")   // → "..."
+ * classifyPunctuationRun("---")    // → "--"
+ * classifyPunctuationRun("?!")     // → "?!"  (unchanged)
+ */
 const classifyPunctuationRun = (run) => {
   if (run.length === 0) return "";
   if (run.length >= 3) {

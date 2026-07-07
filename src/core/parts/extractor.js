@@ -42,8 +42,16 @@ const CONNECTORS = ["-", "'", "&", ",", ".", "$"];
  * @property {number} [maxPeelIterations=20] Worst-case fuse on the peel loop.
  */
 
-// Sort a Map<value,freq> into [value,freq] pairs by (freq desc, value asc).
-// value asc is byte-wise (JS `<` on byte-strings == C++ std::string operator<).
+/**
+ * @function sortByFreqDesc
+ * @description Flattens a frequency map into `[value, freq]` pairs sorted by
+ * frequency descending, breaking ties by value ascending. The value comparison
+ * is byte-wise (JS `<` on byte-strings matches C++ `std::string::operator<`),
+ * so the ordering is deterministic across the port.
+ *
+ * @param {Map<string, number>} freqMap - Map from value to its observed count.
+ * @returns {Array<[string, number]>} The entries sorted by `(freq desc, value asc)`.
+ */
 const sortByFreqDesc = (freqMap) => {
   const v = [...freqMap.entries()];
   v.sort((a, b) => {
@@ -53,9 +61,34 @@ const sortByFreqDesc = (freqMap) => {
   return v;
 };
 
+/**
+ * @function prunedCount
+ * @description Computes how many of the frequency-sorted candidates survive the
+ * adaptive cascade prune, by handing their frequencies (already in descending
+ * order) to {@link adaptivePruneCount}. The returned count is the cutoff `k`
+ * used with {@link addTopK}.
+ *
+ * @param {Array<[string, number]>} sorted - Candidates sorted by frequency
+ *   descending (as produced by {@link sortByFreqDesc}).
+ * @returns {number} The number of top candidates to keep.
+ */
 const prunedCount = (sorted) => adaptivePruneCount(sorted.map((e) => e[1]));
 
-// Add the first k of `sorted` under `kind`, skipping any already present.
+/**
+ * @function addTopK
+ * @description Adds the first `k` of the frequency-sorted candidates to the
+ * dictionary under `kind`, skipping any value already present for that kind, and
+ * reports how many were newly inserted. Used to promote the cascade-pruned top
+ * substrings during seeding and each peel sweep.
+ *
+ * @param {PartDictionary} dict - The dictionary being populated.
+ * @param {number} kind - The {@link Kind} to insert the values under.
+ * @param {Array<[string, number]>} sorted - Candidates sorted by frequency
+ *   descending (as produced by {@link sortByFreqDesc}).
+ * @param {number} k - Maximum number of leading candidates to consider
+ *   (typically {@link prunedCount}); capped at `sorted.length`.
+ * @returns {number} The count of parts actually added (new insertions only).
+ */
 const addTopK = (dict, kind, sorted, k) => {
   let added = 0;
   const lim = Math.min(k, sorted.length);
@@ -68,16 +101,62 @@ const addTopK = (dict, kind, sorted, k) => {
   return added;
 };
 
+/**
+ * @function addLetterPositions
+ * @description Seeds the three positional Letter atoms for a single character:
+ * start (`s##`), middle (`##s##`), and end (`##s`). The `##` markers encode
+ * word-boundary position, mirroring how positional atoms are matched during
+ * decomposition.
+ *
+ * @param {PartDictionary} dict - The dictionary being populated.
+ * @param {string} s - The single-character byte-string to add positional atoms for.
+ * @returns {void}
+ */
 const addLetterPositions = (dict, s) => {
   dict.add(Kind.Letter, s + "##");
   dict.add(Kind.Letter, "##" + s + "##");
   dict.add(Kind.Letter, "##" + s);
 };
 
+/**
+ * @function bump
+ * @description Adds `weight` to `key`'s running tally in a frequency-accumulator
+ * map, initializing the entry to `0` when the key is first seen.
+ *
+ * @param {Map<string, number>} bin - The accumulator map to update in place.
+ * @param {string} key - The key whose tally is incremented.
+ * @param {number} weight - The amount to add to the key's tally.
+ * @returns {Map<string, number>} The same `bin` map, after the update.
+ */
 const bump = (bin, key, weight) => bin.set(key, (bin.get(key) || 0) + weight);
 
-// One peel iteration: pool the current length->=2 singleton runs, then sweep
-// L from kMax..kMin promoting cascade-pruned Start/Mid/End winners.
+/**
+ * @function runPeelIteration
+ * @description Runs a single iteration of the peel loop against the current
+ * dictionary.
+ *
+ * First it re-decomposes every training word with the dictionary as it stands
+ * (via {@link findSingletonRuns}) and pools every length-≥2 singleton run — the
+ * spans the dictionary still cannot cover with a real part — recording each run's
+ * substring, whether it touches the word's start/end, and its word frequency as a
+ * weight.
+ *
+ * Then, for each substring length `L` from {@link kMaxPartLength} down to
+ * {@link kMinPartLength}, it bins every length-`L` window of the pooled runs by
+ * frequency: interior windows into the Mid bin, and start-/end-touching prefixes
+ * and suffixes into the Start/End bins. Each bin is frequency-sorted and its
+ * cascade-pruned top entries ({@link prunedCount}) are promoted into the
+ * dictionary as new Start/Mid/End parts via {@link addTopK}.
+ *
+ * @param {PartDictionary} dict - The dictionary to decompose against and extend
+ *   in place with newly promoted parts.
+ * @param {Map<string, number>} allWordFreq - Map from training word to its
+ *   observed frequency, supplying both the words to decompose and the run weights.
+ * @returns {{ partsAdded: number, totalRuns: number }}
+ *   `partsAdded` is the number of new parts promoted this iteration;
+ *   `totalRuns` is the number of length-≥2 singleton runs pooled. The caller
+ *   stops the peel loop when either reaches `0`.
+ */
 const runPeelIteration = (dict, allWordFreq) => {
   const pool = [];
   for (const [word, freq] of allWordFreq) {

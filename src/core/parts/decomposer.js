@@ -33,6 +33,26 @@
 import { Kind, kMinPartLength, kMaxPartLength, kInvalidPartId } from "./kind.js";
 
 // ---- Letter singleton (## position marker) -------------------------------
+/**
+ * @function emitLetter
+ * @description Looks up the Letter-singleton part ID for a single character `c`,
+ * choosing the spelling that encodes where the character sits within its word.
+ * The `##` sigil marks the truncated side(s): `"##c"` for an end-only position,
+ * `"##c##"` for a mid position, and `"c##"` for a start position. When both
+ * `atStart` and `atEnd` are set (a lone character), the start encoding is used.
+ *
+ * @param {import("./dictionary.js").PartDictionary} dict
+ *   Part dictionary used to look up the Letter entry.
+ * @param {string} c - The single character (byte) to encode.
+ * @param {boolean} atStart - Whether the character sits at the word's start.
+ * @param {boolean} atEnd - Whether the character sits at the word's end.
+ * @returns {number} The Letter part ID, or `kInvalidPartId` if unregistered.
+ *
+ * @example
+ * emitLetter(dict, "y", false, false)  // → dict.lookup(Kind.Letter, "##y##")
+ * emitLetter(dict, "x", true,  false)  // → dict.lookup(Kind.Letter, "x##")
+ * emitLetter(dict, "z", false, true)   // → dict.lookup(Kind.Letter, "##z")
+ */
 const emitLetter = (dict, c, atStart, atEnd) => {
   let s;
   if (atEnd && !atStart) s = "##" + c;
@@ -42,8 +62,29 @@ const emitLetter = (dict, c, atStart, atEnd) => {
 };
 
 // ---- Candidate enumeration -----------------------------------------------
-// For every L in [kMin, kMax] and every valid position, ask the dict whether
-// the substring is a registered Start/End/Mid. Collect the hits.
+/**
+ * @function enumerateCandidates
+ * @description Enumerates every registered Start/End/Mid substring of `word`
+ * that could participate in the greedy peel. For each length `L` in
+ * `[kMinPartLength, kMaxPartLength]` (capped at the word length) it probes three
+ * placements against the dictionary:
+ *
+ * - **Start** — the prefix `word[0..L)`, looked up as `Kind.Start`.
+ * - **End** — the suffix `word[n-L..n)`, looked up as `Kind.End`.
+ * - **Mid** — every substring `word[pos..pos+L)` for all valid `pos`, looked up
+ *   as `Kind.Mid`.
+ *
+ * Only lookups that resolve to a valid part ID are kept. The result is an
+ * unordered flat list of candidate records; {@link sortCandidatesById} imposes
+ * the peel priority and {@link peel} consumes it.
+ *
+ * @param {import("./dictionary.js").PartDictionary} dict
+ *   Part dictionary used to look up Start/End/Mid substrings.
+ * @param {string} word - The word to scan, as a byte-string.
+ * @returns {Array<{pos: number, L: number, kind: number, id: number}>}
+ *   One record per registered candidate: `pos` is the inclusive start offset,
+ *   `L` the length, `kind` the {@link Kind}, and `id` the resolved part ID.
+ */
 const enumerateCandidates = (dict, word) => {
   const n = word.length;
   const out = [];
@@ -68,22 +109,73 @@ const enumerateCandidates = (dict, word) => {
   return out;
 };
 
-// Sort by (id asc, pos asc): dict ID order == insertion order == whatever
-// priority the dict's builder/reorderer shaped.
+/**
+ * @function sortCandidatesById
+ * @description Sorts a candidate list in place by ascending part ID, breaking
+ * ties by ascending position. Dictionary ID order mirrors insertion order,
+ * which is whatever priority the dict's builder/reorderer shaped — so lower IDs
+ * are peeled first, giving the greedy claim in {@link peel} its precedence.
+ *
+ * @param {Array<{pos: number, L: number, kind: number, id: number}>} cands
+ *   Candidate records (as produced by {@link enumerateCandidates}); mutated in place.
+ * @returns {void}
+ */
 const sortCandidatesById = (cands) => {
   cands.sort((a, b) => (a.id !== b.id ? a.id - b.id : a.pos - b.pos));
 };
 
+/**
+ * @function rangeIsFree
+ * @description Reports whether the half-open span `[begin, end)` is entirely
+ * unclaimed in the `claimed` bitmap — i.e. no position within it has been taken
+ * by a previously peeled candidate.
+ *
+ * @param {boolean[]} claimed - Per-position occupancy flags.
+ * @param {number} begin - Inclusive start of the span to test.
+ * @param {number} end - Exclusive end of the span to test.
+ * @returns {boolean} `true` if every position in `[begin, end)` is free.
+ */
 const rangeIsFree = (claimed, begin, end) => {
   for (let i = begin; i < end; i++) if (claimed[i]) return false;
   return true;
 };
 
+/**
+ * @function claimRange
+ * @description Marks every position in the half-open span `[begin, end)` as
+ * claimed in the `claimed` bitmap. Mutates `claimed` in place.
+ *
+ * @param {boolean[]} claimed - Per-position occupancy flags (mutated in place).
+ * @param {number} begin - Inclusive start of the span to claim.
+ * @param {number} end - Exclusive end of the span to claim.
+ * @returns {void}
+ */
 const claimRange = (claimed, begin, end) => {
   for (let i = begin; i < end; i++) claimed[i] = true;
 };
 
-// Apply the greedy peel to a pre-sorted candidate list.
+/**
+ * @function peel
+ * @description Applies the greedy peel to a pre-sorted candidate list — the
+ * shared core of {@link decomposeWord} and {@link findSingletonRuns}.
+ *
+ * Walking the candidates in priority order (see {@link sortCandidatesById}), it
+ * claims the first candidate whose span is still free, subject to two rules:
+ * at most one Start and one End may ever be claimed (tracked by `hasStartClaim`
+ * / `hasEndClaim`), whereas Mid candidates may fire any number of times.
+ * Candidates that overlap an already-claimed span, or that would exceed the
+ * single-Start / single-End budget, are skipped. Positions left uncovered are
+ * not filled here — the callers turn them into Letter singletons or runs.
+ *
+ * @param {number} n - Length of the word being decomposed.
+ * @param {Array<{pos: number, L: number, kind: number, id: number}>} candidates
+ *   Candidate records, pre-sorted by {@link sortCandidatesById}.
+ * @returns {{emitted: Array<[number, number]>, claimed: boolean[], hasStartClaim: boolean, hasEndClaim: boolean}}
+ *   `emitted` is a list of `[pos, id]` pairs for each claimed candidate (in
+ *   claim order, not position order); `claimed` is the final per-position
+ *   occupancy bitmap; `hasStartClaim`/`hasEndClaim` record whether a Start/End
+ *   candidate was consumed.
+ */
 const peel = (n, candidates) => {
   const claimed = new Array(n).fill(false);
   const emitted = [];

@@ -37,6 +37,22 @@ import { Kind, kInvalidPartId } from "./kind.js";
 const CONNECTORS = ["-", "'", "&", ",", ".", "$"];
 const CONNECTOR_CODES = new Set(CONNECTORS.map((c) => c.charCodeAt(0)));
 
+/**
+ * @function keyOf
+ * @description Builds the composite map key that uniquely identifies a
+ * `(kind, value)` part. The {@link Kind} numeric value is encoded as a single
+ * leading UTF-16 code unit (via `String.fromCharCode`) and the byte-string
+ * `value` is appended verbatim, so the same value under a different kind yields
+ * a distinct key. Used by {@link PartDictionary} as the key of its
+ * `_keyToId` map.
+ * @param {number} kind - A {@link Kind} value (used as a character code).
+ * @param {string} value - The part value as a byte-string.
+ * @returns {string} The composite key: the kind character followed by `value`.
+ *
+ * @example
+ * // Kind.Whole === 4, so the key is String.fromCharCode(4) + "the":
+ * keyOf(Kind.Whole, "the")   // → String.fromCharCode(4) + "the"
+ */
 const keyOf = (kind, value) => String.fromCharCode(kind) + value;
 
 /**
@@ -276,9 +292,28 @@ export class PartDictionary {
 
 // ---- Augment set membership ----------------------------------------------
 
+/**
+ * @function isConnectorValue
+ * @description Returns `true` if `value` is exactly one of the six connector
+ * characters (`- ' & , . $`). Used to detect the connector atoms that
+ * {@link augmentWithAtoms} regenerates and the serializers therefore omit.
+ * @param {string} value - The part value as a byte-string.
+ * @returns {boolean} `true` if `value` is a single connector character.
+ */
 const isConnectorValue = (value) => value.length === 1 && CONNECTOR_CODES.has(value.charCodeAt(0));
 
-// True if `augmentWithAtoms` would regenerate this part (so IO omits it).
+/**
+ * @function isAugmented
+ * @description Returns `true` if the given part is one that
+ * {@link augmentWithAtoms} would regenerate deterministically at load, and so
+ * must be omitted from serialized files. Matches:
+ * - every {@link Kind.Letter} part (the positional letter singletons);
+ * - single-character {@link Kind.Whole} atoms in `a`–`z`, `0`–`9`, or the six
+ *   connectors;
+ * - {@link Kind.Delimiter} parts whose value is a connector.
+ * @param {{ kind: number, value: string }} part - A `(kind, value)` entry.
+ * @returns {boolean} `true` if the part is an augment atom (excluded from IO).
+ */
 const isAugmented = ({ kind, value }) => {
   if (kind === Kind.Letter) return true;
   if (kind === Kind.Whole && value.length === 1) {
@@ -317,6 +352,19 @@ const isAugmented = ({ kind, value }) => {
  * dict.lookup(Kind.Letter, "##a##");  // not kInvalidPartId
  */
 export const augmentWithAtoms = (dict) => {
+  /**
+   * @function addLetterPositions
+   * @description Adds the three positional {@link Kind.Letter} forms for a single
+   * character `s` into the enclosing `dict`, using the `"##"` position
+   * convention: word-start (`s##`), word-interior (`##s##`), and word-end
+   * (`##s`). Relies on {@link PartDictionary#add} deduping, so it is idempotent.
+   * @param {string} s - The single character to seed positional letters for.
+   * @returns {void}
+   *
+   * @example
+   * addLetterPositions("a");
+   * // adds Kind.Letter "a##", "##a##", "##a"
+   */
   const addLetterPositions = (s) => {
     dict.add(Kind.Letter, s + "##");
     dict.add(Kind.Letter, "##" + s + "##");
@@ -335,6 +383,22 @@ export const augmentWithAtoms = (dict) => {
 
 // ---- Text escape / unescape (for delimiter values) -----------------------
 
+/**
+ * @function escapeValue
+ * @description Encodes a delimiter value into the text-file escape form so it can
+ * be written as a single line in the `[delim]` section. The escaping is:
+ * newline → `\n`, tab → `\t`, carriage return → `\r`, backslash → `\\`, and any
+ * other control byte (`< 0x20` or `0x7f`) → `\xHH` (two uppercase hex digits).
+ * All other bytes are passed through unchanged. This is the inverse of
+ * {@link unescapeValue}.
+ * @param {string} s - The delimiter value as a byte-string.
+ * @returns {string} The escaped, single-line-safe representation.
+ *
+ * @example
+ * escapeValue("a\tb")   // → "a\\tb"    (a real tab becomes the two chars \t)
+ * escapeValue("\x00")   // → "\\x00"   (NUL becomes the four chars \x00)
+ * escapeValue("a b")    // → "a b"     (printable bytes unchanged)
+ */
 const escapeValue = (s) => {
   let out = "";
   for (let i = 0; i < s.length; i++) {
@@ -350,6 +414,21 @@ const escapeValue = (s) => {
   return out;
 };
 
+/**
+ * @function hexDigit
+ * @description Converts a single hexadecimal ASCII character code into its
+ * numeric value `0`–`15`, or `-1` if the code is not a hex digit. Accepts
+ * `0`–`9`, lowercase `a`–`f`, and uppercase `A`–`F`. Used by
+ * {@link unescapeValue} to decode `\xHH` escapes.
+ * @param {number} c - A character code (as from `charCodeAt`).
+ * @returns {number} The digit value `0`–`15`, or `-1` if `c` is not a hex digit.
+ *
+ * @example
+ * hexDigit("7".charCodeAt(0))   // → 7
+ * hexDigit("a".charCodeAt(0))   // → 10
+ * hexDigit("F".charCodeAt(0))   // → 15
+ * hexDigit("z".charCodeAt(0))   // → -1
+ */
 const hexDigit = (c) => {
   if (c >= 48 && c <= 57) return c - 48;
   if (c >= 97 && c <= 102) return c - 97 + 10;
@@ -357,6 +436,22 @@ const hexDigit = (c) => {
   return -1;
 };
 
+/**
+ * @function unescapeValue
+ * @description Decodes a delimiter value from the text-file escape form back into
+ * its raw byte-string, inverting {@link escapeValue}. Recognizes `\n`, `\t`,
+ * `\r`, `\\`, and `\xHH` (two hex digits via {@link hexDigit}). A backslash that
+ * does not begin a recognized escape — including a trailing backslash or a
+ * malformed `\xHH` — is emitted literally and parsing continues at the next
+ * character.
+ * @param {string} s - The escaped, single-line delimiter representation.
+ * @returns {string} The decoded raw value as a byte-string.
+ *
+ * @example
+ * unescapeValue("a\\tb")   // → "a\tb"   (the two chars \t become a real tab)
+ * unescapeValue("\\x41")   // → "A"      (\x41 decodes to byte 0x41)
+ * unescapeValue("a\\")     // → "a\\"    (dangling backslash kept literally)
+ */
 const unescapeValue = (s) => {
   let out = "";
   for (let i = 0; i < s.length; ) {
@@ -403,7 +498,20 @@ const unescapeValue = (s) => {
   return out;
 };
 
+/**
+ * @function startsWithHashHash
+ * @description Returns `true` if `s` begins with the `"##"` position marker.
+ * @param {string} s - The line/value to test.
+ * @returns {boolean} `true` if the first two characters are `#` and `#`.
+ */
 const startsWithHashHash = (s) => s.length >= 2 && s.charCodeAt(0) === 35 && s.charCodeAt(1) === 35;
+
+/**
+ * @function endsWithHashHash
+ * @description Returns `true` if `s` ends with the `"##"` position marker.
+ * @param {string} s - The line/value to test.
+ * @returns {boolean} `true` if the last two characters are `#` and `#`.
+ */
 const endsWithHashHash = (s) =>
   s.length >= 2 && s.charCodeAt(s.length - 2) === 35 && s.charCodeAt(s.length - 1) === 35;
 
