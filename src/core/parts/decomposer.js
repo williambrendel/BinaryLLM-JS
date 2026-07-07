@@ -1,21 +1,34 @@
 "use strict";
 
-// ============================================================================
-// core/parts/decomposer.js
-//
-// Port of core/parts/decomposer.cpp — one peel algorithm, two callers:
-//
-//   decomposeWord        — public; word -> sequence of part IDs
-//   findSingletonRuns    — internal; the length->=2 uncovered ranges the
-//                          extractor's peel loop turns into new candidates
-//
-// Algorithm: Whole fast path; else enumerate every Start/End/Mid candidate,
-// order by (dict ID, pos), greedily claim non-overlapping ranges (one Start
-// and one End max; Mid may fire repeatedly), then fill any uncovered
-// position with a positional Letter singleton ("##" markers).
-//
-// All strings are byte-strings (see byteString.js).
-// ============================================================================
+/**
+ * @file decomposer.js
+ * @brief Greedy decomposition of words and delimiters into dictionary part IDs.
+ *
+ * Port of `core/parts/decomposer.cpp` — a single "peel" algorithm shared by
+ * three exported entry points:
+ *
+ * - `decomposeWord`      — word → left-to-right sequence of part IDs.
+ * - `findSingletonRuns`  — the contiguous uncovered ranges the same peel leaves
+ *   behind, which the extractor's peel loop turns into new candidates.
+ * - `decomposeDelimiter` — delimiter token → part IDs, per-byte on miss.
+ *
+ * **Algorithm.** Try a Whole-word fast path first; otherwise enumerate every
+ * registered Start/End/Mid candidate substring, order them by `(dict ID, pos)`,
+ * then greedily claim non-overlapping ranges — at most one Start and one End,
+ * while Mid may fire repeatedly. Any position still uncovered is filled with a
+ * positional Letter singleton whose spelling encodes where it sits:
+ * `"x##"` (start), `"##y##"` (mid), or `"##z"` (end).
+ *
+ * All strings are byte-strings (see `byteString.js`).
+ *
+ * **Exported surface:**
+ * - `decomposeWord(dict, word)`      → `number[]`
+ * - `findSingletonRuns(dict, word)`  → `Array<{ start, end, touchesWordStart, touchesWordEnd }>`
+ * - `decomposeDelimiter(dict, delim)` → `number[]`
+ *
+ * @see {@link decomposeWord}
+ * @see {@link findSingletonRuns}
+ */
 
 import { Kind, kMinPartLength, kMaxPartLength, kInvalidPartId } from "./kind.js";
 
@@ -89,11 +102,30 @@ const peel = (n, candidates) => {
 };
 
 /**
- * Decompose a single (lowercased, byte-string) word into part IDs, in
- * left-to-right stream order.
+ * @function decomposeWord
+ * @description Decomposes a single (lowercased, byte-string) word into part IDs,
+ * in left-to-right stream order.
+ *
+ * If the word is registered as a Whole entry, it takes the fast path and returns
+ * that single ID. Otherwise the greedy peel claims the best Start/End/Mid
+ * candidates and every remaining position is filled with a positional Letter
+ * singleton, so the returned sequence always covers the whole word.
+ *
  * @param {import("./dictionary.js").PartDictionary} dict
- * @param {string} word byte-string.
- * @returns {number[]}
+ *   Part dictionary used to look up candidate substrings and Letter singletons.
+ * @param {string} word - The word to decompose, as a byte-string.
+ * @returns {number[]} Part IDs in left-to-right order. Empty for an empty word.
+ *
+ * @example
+ * // Whole fast path: "the" is registered as a Whole entry.
+ * decomposeWord(dict, "the")   // → [<Whole id for "the">]  (single id)
+ *
+ * @example
+ * // No candidates: every position falls back to a positional Letter singleton.
+ * decomposeWord(dict, "xyz")
+ * // → [ dict.lookup(Kind.Letter, "x##"),    // start
+ * //     dict.lookup(Kind.Letter, "##y##"),  // mid
+ * //     dict.lookup(Kind.Letter, "##z") ]   // end
  */
 export const decomposeWord = (dict, word) => {
   const n = word.length;
@@ -123,11 +155,30 @@ export const decomposeWord = (dict, word) => {
 };
 
 /**
- * The uncovered (Letter-singleton) ranges left by the same peel — used by the
- * extractor's peel loop. start inclusive, end exclusive.
+ * @function findSingletonRuns
+ * @description Returns the contiguous uncovered (Letter-singleton) ranges left
+ * behind by the same peel that {@link decomposeWord} uses — consumed by the
+ * extractor's peel loop. Each run's `start` is inclusive and `end` is exclusive.
+ *
+ * A Whole-word match claims the entire word, so it yields no runs. When nothing
+ * is claimed the whole word is returned as a single run touching both ends.
+ *
  * @param {import("./dictionary.js").PartDictionary} dict
- * @param {string} word byte-string.
+ *   Part dictionary used to look up candidate substrings.
+ * @param {string} word - The word to scan, as a byte-string.
  * @returns {Array<{start: number, end: number, touchesWordStart: boolean, touchesWordEnd: boolean}>}
+ *   One entry per uncovered run. `touchesWordStart`/`touchesWordEnd` flag runs
+ *   that reach the word's first/last position. Empty when the word is empty or
+ *   fully claimed (e.g. a Whole match).
+ *
+ * @example
+ * // No candidates claim any position, so the whole word is one run.
+ * findSingletonRuns(dict, "abc")
+ * // → [{ start: 0, end: 3, touchesWordStart: true, touchesWordEnd: true }]
+ *
+ * @example
+ * // "the" is a Whole entry — fully claimed, so no runs remain.
+ * findSingletonRuns(dict, "the")   // → []
  */
 export const findSingletonRuns = (dict, word) => {
   const runs = [];
@@ -163,11 +214,25 @@ export const findSingletonRuns = (dict, word) => {
 };
 
 /**
- * Decompose a delimiter token into part IDs. Falls back to per-byte emission
- * for unseen delimiter strings.
+ * @function decomposeDelimiter
+ * @description Decomposes a delimiter token into part IDs. If the whole token is
+ * a registered Delimiter it emits a single ID; otherwise it falls back to
+ * per-byte emission, looking up each byte as its own Delimiter and skipping any
+ * that are unknown.
+ *
  * @param {import("./dictionary.js").PartDictionary} dict
- * @param {string} delim byte-string.
- * @returns {number[]}
+ *   Part dictionary used to look up Delimiter entries.
+ * @param {string} delim - The delimiter token, as a byte-string.
+ * @returns {number[]} Part IDs for the token. Empty for an empty token.
+ *
+ * @example
+ * // "-" is a registered Delimiter — emitted as a single id.
+ * decomposeDelimiter(dict, "-")   // → [dict.lookup(Kind.Delimiter, "-")]
+ *
+ * @example
+ * // Unknown multi-byte token — falls back to per-byte lookup of "-" and "-".
+ * decomposeDelimiter(dict, "--")
+ * // → [dict.lookup(Kind.Delimiter, "-"), dict.lookup(Kind.Delimiter, "-")]
  */
 export const decomposeDelimiter = (dict, delim) => {
   const out = [];

@@ -1,24 +1,45 @@
 "use strict";
 
-// ============================================================================
-// core/parts/tokenize.js
-//
-// Port of core/parts/tokenize.cpp — the stream tokenizer. Splits raw text
-// into a sequence of Word and Delimiter tokens in stream order, applying the
-// same connector, number-prefix, and run-normalization rules as the C++.
-//
-// Works on byte-strings (see byteString.js): input is converted with
-// toByteString so classification and lowercasing are byte-wise, matching
-// std::string. Token `value`s are byte-strings; call fromByteString to
-// display them.
-// ============================================================================
+/**
+ * @file tokenize.js
+ * @brief Stream tokenizer — splits raw text into Word and Delimiter tokens.
+ *
+ * Port of `core/parts/tokenize.cpp`. Splits raw text into a sequence of Word
+ * and Delimiter tokens in stream order, applying the same connector,
+ * number-prefix, and run-normalization rules as the C++ implementation.
+ *
+ * Works on byte-strings (see `byteString.js`): input is converted with
+ * {@link toByteString} so classification and lowercasing are byte-wise,
+ * matching `std::string`. Token `value`s are byte-strings; call
+ * `fromByteString` to display them.
+ *
+ * **Exported surface:**
+ * - `StreamTokenType` — enum tagging each emitted token (`Word` / `Delimiter`).
+ * - `asciiLowercase(s)` → byte-string with ASCII letters lowercased.
+ * - `tokenizeStream(raw)` → `Array<{ type, value }>` in stream order.
+ *
+ * @see {@link tokenizeStream}
+ * @see {@link StreamTokenType}
+ */
 
 import { toByteString } from "./byteString.js";
 
 /**
- * Token category emitted by {@link tokenizeStream}.
+ * @constant StreamTokenType
+ * @description Token category emitted by {@link tokenizeStream}. A frozen
+ * enum: `Word` tokens carry the lowercased word (byte-string) and `Delimiter`
+ * tokens carry the normalized whitespace or punctuation run (byte-string).
  * @readonly
  * @enum {number}
+ *
+ * @example
+ * StreamTokenType.Word        // → 0
+ * StreamTokenType.Delimiter   // → 1
+ *
+ * @example
+ * // Inspecting a token's category:
+ * const [tok] = tokenizeStream("hi");
+ * tok.type === StreamTokenType.Word   // → true
  */
 export const StreamTokenType = Object.freeze({
   Word: 0, // value is the lowercased word (byte-string)
@@ -60,9 +81,18 @@ const classify = (c) => {
 };
 
 /**
- * Lowercase ASCII letters in a byte-string; other bytes unchanged.
- * @param {string} s byte-string.
- * @returns {string}
+ * @function asciiLowercase
+ * @description Lowercase the ASCII letters (`A`–`Z`) in a byte-string; every
+ * other byte is left unchanged. Operates byte-wise, so non-ASCII bytes and
+ * digits/punctuation pass through untouched.
+ *
+ * @param {string} s - Byte-string to lowercase.
+ * @returns {string} A new byte-string with ASCII uppercase letters lowered.
+ *
+ * @example
+ * asciiLowercase("Hello")     // → "hello"
+ * asciiLowercase("ABC-123")   // → "abc-123"  (digits and dash unchanged)
+ * asciiLowercase("already")   // → "already"
  */
 export const asciiLowercase = (s) => {
   let out = "";
@@ -130,15 +160,37 @@ const classifyPunctuationRun = (run) => {
 };
 
 /**
- * Tokenize raw text into Word / Delimiter tokens.
+ * @function tokenizeStream
+ * @description Tokenize raw text into `Word` / `Delimiter` tokens in stream
+ * order. Word runs may include in-word connectors (`-`, `&`, `'`, `,`, `.`)
+ * and a leading `[+-]?\$?` number prefix; whitespace and punctuation runs are
+ * collapsed into normalized delimiter values.
  *
- * See tokenize.cpp for the full rule set: `-`/`&`/`'`/`,`/`.` in-word
+ * See `tokenize.cpp` for the full rule set: `-`/`&`/`'`/`,`/`.` in-word
  * connectors, acronym and decimal handling, leading `[+-]?\$?` number
- * prefixes, and whitespace/punctuation run normalization.
+ * prefixes, and whitespace/punctuation run normalization. Each token's
+ * `type` is a {@link StreamTokenType} value and its `value` is a byte-string.
  *
- * @param {string|Uint8Array} raw UTF-8 text or raw bytes.
- * @returns {Array<{type: number, value: string}>} tokens (value is a
- *   byte-string).
+ * @param {string|Uint8Array} raw - UTF-8 text or raw bytes to tokenize.
+ * @returns {Array<{type: number, value: string}>} Tokens in stream order;
+ *   each `value` is a byte-string (empty input yields `[]`).
+ *
+ * @example
+ * tokenizeStream("Hi there")
+ * // → [
+ * //     { type: 0, value: "hi" },      // Word
+ * //     { type: 1, value: " " },       // Delimiter
+ * //     { type: 0, value: "there" }    // Word
+ * //   ]
+ *
+ * @example
+ * // Number prefix ($) and thousands comma stay inside one Word.
+ * tokenizeStream("$3,000")
+ * // → [ { type: 0, value: "$3,000" } ]
+ *
+ * @example
+ * // Empty input yields no tokens.
+ * tokenizeStream("")   // → []
  */
 export const tokenizeStream = (raw) => {
   const s = toByteString(raw);

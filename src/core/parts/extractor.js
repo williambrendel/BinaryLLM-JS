@@ -1,29 +1,30 @@
 "use strict";
 
-// ============================================================================
-// core/parts/extractor.js
-//
-// Port of core/parts/extractor.cpp — PartExtractor builds a PartDictionary
-// from observed words and delimiters via the iterative peel algorithm.
-//
-//   const ex = new PartExtractor();
-//   for (const tok of tokenizeStream(raw)) {
-//     if (tok.type === StreamTokenType.Word) ex.addWord(tok.value);
-//     else ex.addDelimiter(tok.value);
-//   }
-//   const dict = ex.finalize();
-//
-// finalize():
-//   1. Seed: whole atoms (length-bound + frequency cascade prune), letter/
-//      digit/connector singletons + positional Letter atoms, observed
-//      delimiters (freq-sorted) + connector delimiters.
-//   2. Peel loop: re-decompose every training word with the current dict,
-//      pool the length->=2 singleton runs, and for L in {7..2} promote the
-//      cascade-pruned top Start/Mid/End substrings. Stop when the run pool is
-//      empty or an iteration adds nothing.
-//
-// All strings are byte-strings (see byteString.js).
-// ============================================================================
+/**
+ * @file extractor.js
+ * @brief Builds a {@link PartDictionary} from observed words and delimiters
+ * via the iterative peel algorithm.
+ *
+ * Port of `core/parts/extractor.cpp`. A {@link PartExtractor} accumulates word
+ * and delimiter frequencies as tokens are fed in, then {@link PartExtractor#finalize}
+ * produces the trained dictionary in two phases:
+ *
+ * 1. **Seed** — whole atoms (length-bound + frequency cascade prune), single-char
+ *    letter/digit/connector singletons plus positional Letter atoms, and observed
+ *    delimiters (frequency-sorted) plus connector delimiters.
+ * 2. **Peel loop** — re-decompose every training word with the current dictionary,
+ *    pool the length-≥2 singleton runs, and for each `L` in `{7..2}` promote the
+ *    cascade-pruned top Start/Mid/End substrings. The loop stops when the run pool
+ *    is empty or an iteration adds nothing new.
+ *
+ * All strings are byte-strings (see `byteString.js`).
+ *
+ * **Exported surface:**
+ * - `PartExtractor` — the trainer class (also the default export).
+ *
+ * @see {@link PartDictionary}
+ * @see {@link findSingletonRuns}
+ */
 
 import { Kind, kMinPartLength, kMaxPartLength, kInvalidPartId } from "./kind.js";
 import { PartDictionary } from "./dictionary.js";
@@ -121,10 +122,42 @@ const runPeelIteration = (dict, allWordFreq) => {
 };
 
 /**
- * Builds a PartDictionary from observed words and delimiters.
+ * @class PartExtractor
+ * @description Trains a {@link PartDictionary} from a stream of observed words
+ * and delimiters. Feed tokens one at a time with {@link PartExtractor#addWord}
+ * and {@link PartExtractor#addDelimiter} (typically driven by `tokenizeStream`),
+ * then call {@link PartExtractor#finalize} to run the seed + peel algorithm and
+ * obtain the trained dictionary.
+ *
+ * The extractor only accumulates frequency counts as tokens arrive; all of the
+ * work happens in `finalize()`. `finalize()` is pure with respect to the
+ * accumulated state, so calling it twice on the same extractor yields
+ * byte-identical dictionaries.
+ *
+ * @example
+ * // Typical flow: construct, feed tokens from tokenizeStream, finalize.
+ * import { PartExtractor } from "./extractor.js";
+ * import { tokenizeStream, StreamTokenType } from "./tokenize.js";
+ *
+ * const ex = new PartExtractor();
+ * for (const tok of tokenizeStream(rawBytes)) {
+ *   if (tok.type === StreamTokenType.Word) ex.addWord(tok.value);
+ *   else ex.addDelimiter(tok.value);
+ * }
+ * const dict = ex.finalize();   // → trained PartDictionary
+ * dict.size();                  // → number of parts in the dictionary
  */
 export class PartExtractor {
-  /** @param {ExtractorConfig} [cfg] */
+  /**
+   * @description Constructs an empty extractor with no observed tokens.
+   * @param {ExtractorConfig} [cfg={}] - Optional configuration overrides.
+   *   Unset fields fall back to their defaults (`wholeMaxLen: 16`,
+   *   `addLetterSingletons: true`, `maxPeelIterations: 20`).
+   *
+   * @example
+   * const ex = new PartExtractor();                  // all defaults
+   * const capped = new PartExtractor({ wholeMaxLen: 12 });
+   */
   constructor(cfg = {}) {
     this._cfg = {
       wholeMaxLen: cfg.wholeMaxLen ?? 16,
@@ -140,8 +173,21 @@ export class PartExtractor {
   }
 
   /**
-   * Feed a word (assumed already lowercased ASCII byte-string).
-   * @param {string} word
+   * @method addWord
+   * @description Feeds one word into the extractor, incrementing both the total
+   * observed-word count and the word's frequency. The word is assumed to be an
+   * already-lowercased ASCII byte-string. Empty words still bump the observed
+   * count but are not recorded in the frequency map.
+   *
+   * @param {string} word - The word token (lowercased ASCII byte-string).
+   * @returns {void}
+   *
+   * @example
+   * const ex = new PartExtractor();
+   * ex.addWord("the");
+   * ex.addWord("the");
+   * ex.observedWordCount();   // → 2
+   * ex.distinctWordCount();   // → 1
    */
   addWord(word) {
     this._wordCount++;
@@ -150,30 +196,100 @@ export class PartExtractor {
   }
 
   /**
-   * Feed a delimiter token (kept literally).
-   * @param {string} delim
+   * @method addDelimiter
+   * @description Feeds one delimiter token into the extractor, incrementing its
+   * frequency. The delimiter is kept literally (byte-string, not normalized).
+   * Empty delimiters are ignored. Delimiter frequencies do not affect the
+   * observed- or distinct-word counts.
+   *
+   * @param {string} delim - The delimiter token (kept literally).
+   * @returns {void}
+   *
+   * @example
+   * const ex = new PartExtractor();
+   * ex.addDelimiter(" ");
+   * ex.addDelimiter(" ");
+   * ex.addDelimiter("\n");
+   * // Observed delimiters are later seeded into the dictionary by finalize().
    */
   addDelimiter(delim) {
     if (delim.length === 0) return;
     this._delimFreq.set(delim, (this._delimFreq.get(delim) || 0) + 1);
   }
 
-  /** @returns {number} */
+  /**
+   * @method observedWordCount
+   * @description Total number of words fed via {@link PartExtractor#addWord},
+   * counting duplicates and empty words.
+   * @returns {number} The running observed-word count.
+   *
+   * @example
+   * const ex = new PartExtractor();
+   * ex.addWord("a"); ex.addWord("a"); ex.addWord("b");
+   * ex.observedWordCount();   // → 3
+   */
   observedWordCount() {
     return this._wordCount;
   }
-  /** @returns {number} */
+  /**
+   * @method distinctWordCount
+   * @description Number of unique non-empty words observed so far.
+   * @returns {number} The count of distinct words in the frequency map.
+   *
+   * @example
+   * const ex = new PartExtractor();
+   * ex.addWord("a"); ex.addWord("a"); ex.addWord("b");
+   * ex.distinctWordCount();   // → 2
+   */
   distinctWordCount() {
     return this._allWordFreq.size;
   }
-  /** @returns {number} peel iterations the most recent finalize() ran. */
+  /**
+   * @method lastPeelIterations
+   * @description Number of peel-loop iterations executed by the most recent
+   * {@link PartExtractor#finalize} call. Returns `0` before `finalize()` has
+   * ever run.
+   * @returns {number} Peel iterations from the last `finalize()`.
+   *
+   * @example
+   * const ex = new PartExtractor();
+   * ex.addWord("running");
+   * ex.finalize();
+   * ex.lastPeelIterations();   // → number of peel passes that ran
+   */
   lastPeelIterations() {
     return this._lastPeelIters;
   }
 
   /**
-   * Build the final dictionary.
-   * @returns {PartDictionary}
+   * @method finalize
+   * @description Runs the seed + peel algorithm over the accumulated word and
+   * delimiter frequencies and returns the trained {@link PartDictionary}.
+   *
+   * Phases:
+   * 1. **Seed** — length-bounded, cascade-pruned Whole atoms; single-char Whole
+   *    atoms and positional Letter atoms for `a`–`z`, `0`–`9`, and the in-word
+   *    connectors (when `addLetterSingletons` is enabled); observed Delimiter
+   *    atoms in frequency order plus the connector delimiters.
+   * 2. **Peel** — up to `maxPeelIterations` passes that re-decompose every
+   *    training word with the current dictionary, pool the length-≥2 singleton
+   *    runs, and promote the cascade-pruned top Start/Mid/End substrings for
+   *    each `L` from `kMaxPartLength` down to `kMinPartLength`. Stops early when
+   *    a pass finds no runs or adds no new parts.
+   *
+   * Does not mutate the extractor's accumulated state (aside from recording the
+   * peel-iteration count), so repeated calls produce byte-identical dictionaries.
+   *
+   * @returns {PartDictionary} The trained dictionary.
+   *
+   * @example
+   * const ex = new PartExtractor();
+   * for (const tok of tokenizeStream(rawBytes)) {
+   *   if (tok.type === StreamTokenType.Word) ex.addWord(tok.value);
+   *   else ex.addDelimiter(tok.value);
+   * }
+   * const dict = ex.finalize();   // → trained PartDictionary
+   * saveDictText(dict);           // → serialized text form of the dictionary
    */
   finalize() {
     const dict = new PartDictionary();

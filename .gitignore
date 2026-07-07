@@ -1,0 +1,13 @@
+# dependencies
+/node_modules
+
+# misc
+.DS_Store
+*.pem
+
+# local env files
+.env
+.env*.local
+
+# claude setup
+.claude/

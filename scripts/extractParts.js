@@ -14,25 +14,43 @@
 //   anything else   -> text ("##" convention, [delim] section)
 //   -               -> text to stdout
 //
+// Output location: a bare filename (no directory component) lands in
+// data/dictionaries/ by default; pass a path with a directory (or an absolute
+// path) to write elsewhere. The target directory is created if needed.
+//
 // Usage:
 //   node scripts/extractParts.js <output.txt|.bin|-> <input.txt|-> [<input> ...]
 //
 // Examples:
-//   node scripts/extractParts.js data/dict.txt data/corpora/alice_en.txt
+//   node scripts/extractParts.js dict.txt data/corpora/alice_en.txt   # -> data/dictionaries/dict.txt
+//   node scripts/extractParts.js /tmp/d.bin data/corpora/alice_en.txt # explicit path used as-is
 //   node scripts/extractParts.js - data/corpora/*.txt | less
 //   cat book.txt | node scripts/extractParts.js dict.bin -
 // ============================================================================
 
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Kind } from "../src/core/parts/kind.js";
 import { tokenizeStream, StreamTokenType } from "../src/core/parts/tokenize.js";
 import { PartExtractor } from "../src/core/parts/extractor.js";
 import { saveDictText, saveDictBinary } from "../src/core/parts/dictionary.js";
 
+// Default output directory for bare filenames: <repo>/data/dictionaries.
+const DEFAULT_DICT_DIR = path.resolve(fileURLToPath(import.meta.url), "..", "..", "data", "dictionaries");
+
 const usage = () => {
   process.stderr.write(
     "usage: node scripts/extractParts.js <output.txt|.bin|-> <input.txt|-> [<input> ...]\n",
   );
+};
+
+// A bare filename (no directory component) defaults into data/dictionaries/;
+// a path with a directory, or an absolute path, is used verbatim.
+const resolveOutput = (out) => {
+  if (out === "-") return out;
+  if (path.dirname(out) === "." && !path.isAbsolute(out)) return path.join(DEFAULT_DICT_DIR, out);
+  return out;
 };
 
 // Read a file (or stdin for "-") as raw bytes.
@@ -74,14 +92,15 @@ const main = () => {
 
   const dict = ex.finalize();
 
-  const binary = outPath.endsWith(".bin");
-  if (outPath === "-") {
+  const resolvedOut = resolveOutput(outPath);
+  const binary = resolvedOut !== "-" && resolvedOut.endsWith(".bin");
+  if (resolvedOut === "-") {
     // Text bytes to stdout (latin1 preserves the byte-string exactly).
     process.stdout.write(Buffer.from(saveDictText(dict), "latin1"));
-  } else if (binary) {
-    fs.writeFileSync(outPath, Buffer.from(saveDictBinary(dict)));
   } else {
-    fs.writeFileSync(outPath, Buffer.from(saveDictText(dict), "latin1"));
+    fs.mkdirSync(path.dirname(resolvedOut), { recursive: true });
+    if (binary) fs.writeFileSync(resolvedOut, Buffer.from(saveDictBinary(dict)));
+    else fs.writeFileSync(resolvedOut, Buffer.from(saveDictText(dict), "latin1"));
   }
 
   process.stderr.write(`inputs: ${inPaths.length}\n`);
@@ -89,8 +108,8 @@ const main = () => {
     `total tokens: ${totalTokens} (words=${totalWords}, delims=${totalDelims})\n`,
   );
   process.stderr.write(
-    `dictionary size F = ${dict.size()} (saved as ${binary && outPath !== "-" ? "binary" : "text"}, ` +
-      "singletons/specials excluded from file)\n",
+    `dictionary size F = ${dict.size()} (saved as ${binary ? "binary" : "text"}` +
+      `${resolvedOut === "-" ? "" : ` -> ${resolvedOut}`}, singletons/specials excluded from file)\n`,
   );
   process.stderr.write(`  whole:  ${dict.countOfKind(Kind.Whole)}\n`);
   process.stderr.write(`  start:  ${dict.countOfKind(Kind.Start)}\n`);

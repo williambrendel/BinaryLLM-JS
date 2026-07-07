@@ -1,17 +1,18 @@
 "use strict";
 
-// ============================================================================
-// core/adaptiveThreshold/adaptiveThreshold.js
-//
-// Port of core/adaptive_threshold — adaptive cut primitives for
-// sorted-descending sequences. The extractor uses `adaptivePruneCount` (the
-// elbow -> scaled-MM cascade) to pick how many candidates to keep from each
-// frequency-sorted bin without any external cap.
-//
-// Every count function takes an array sorted DESCENDING and returns k in
-// [0, n] meaning "keep the first k". k === n means "no cut"; k === 0 only for
-// empty / all-nonpositive input.
-// ============================================================================
+/**
+ * @file adaptiveThreshold.js
+ * @brief Port of core/adaptive_threshold — adaptive cut primitives for
+ * sorted-DESCENDING sequences.
+ *
+ * The extractor uses {@link adaptivePruneCount} (the elbow → scaled-MM cascade)
+ * to pick how many candidates to keep from each frequency-sorted bin without
+ * any external cap.
+ *
+ * Every count function takes an array sorted DESCENDING and returns `k` in
+ * `[0, n]` meaning "keep the first k". `k === n` means "no cut"; `k === 0` only
+ * for empty / all-non-positive input.
+ */
 
 // Defaults — referenced by name so call sites carry no magic numbers.
 export const kRatioMinGap = 1.5;
@@ -26,6 +27,10 @@ export const kNoMaxCutIndex = Number.POSITIVE_INFINITY;
  * @param {number[]} sortedDesc
  * @param {number} [maxCutIndex=kNoMaxCutIndex]
  * @returns {number}
+ *
+ * @example
+ * entropyEffectiveCount([10, 0, 0, 0])   // → 1   (a delta: one dominant mass)
+ * entropyEffectiveCount([1, 1, 1, 1])    // → 4   (flat head: keep everything)
  */
 export const entropyEffectiveCount = (sortedDesc, maxCutIndex = kNoMaxCutIndex) => {
   const n = sortedDesc.length;
@@ -57,6 +62,10 @@ export const entropyEffectiveCount = (sortedDesc, maxCutIndex = kNoMaxCutIndex) 
  * @param {number} [eps=kRatioEps]
  * @param {number} [maxCutIndex=kNoMaxCutIndex]
  * @returns {number}
+ *
+ * @example
+ * gapRatioEffectiveCount([100, 100, 1, 1])   // → 2   (sharp drop after the 100s)
+ * gapRatioEffectiveCount([5, 5, 0, 0])       // → 2   (positive→zero = infinite gap)
  */
 export const gapRatioEffectiveCount = (
   sortedDesc,
@@ -106,6 +115,10 @@ export const gapRatioEffectiveCount = (
  * @param {number[]} sortedDesc
  * @param {number} [sig=kElbowSig]
  * @returns {number}
+ *
+ * @example
+ * elbowEffectiveCount([100, 100, 1, 1, 1, 1, 1, 1, 1, 1])   // → 2   (elbow at the cliff)
+ * elbowEffectiveCount([1, 1, 1, 1])                         // → 4   (no significant elbow)
  */
 export const elbowEffectiveCount = (sortedDesc, sig = kElbowSig) => {
   const n = sortedDesc.length;
@@ -142,6 +155,9 @@ export const elbowEffectiveCount = (sortedDesc, sig = kElbowSig) => {
  * @param {number[]} sortedDesc
  * @param {number} [factor=kMMFactor]
  * @returns {number}
+ *
+ * @example
+ * scaledMmEffectiveCount([1, 1, 1, 1])   // → 4   (saturates to n on a flat mass)
  */
 export const scaledMmEffectiveCount = (sortedDesc, factor = kMMFactor) => {
   const n = sortedDesc.length;
@@ -173,6 +189,10 @@ export const scaledMmEffectiveCount = (sortedDesc, factor = kMMFactor) => {
  * @param {number} [sig=kElbowSig]
  * @param {number} [factor=kMMFactor]
  * @returns {number} number of head elements to keep.
+ *
+ * @example
+ * adaptivePruneCount([100, 100, 1, 1, 1, 1, 1, 1, 1, 1])   // → 2   (elbow wins)
+ * adaptivePruneCount([1, 1, 1, 1])                         // → 4   (scaled-MM fallback)
  */
 export const adaptivePruneCount = (sortedDesc, sig = kElbowSig, factor = kMMFactor) => {
   const n = sortedDesc.length;
@@ -188,6 +208,10 @@ export const adaptivePruneCount = (sortedDesc, sig = kElbowSig, factor = kMMFact
  * @param {number} [sig=kElbowSig]
  * @param {number} [factor=kMMFactor]
  * @returns {number}
+ *
+ * @example
+ * adaptivePruneThreshold([100, 100, 1, 1, 1, 1, 1, 1, 1, 1])   // → 1   (first dropped value)
+ * adaptivePruneThreshold([1, 1, 1, 1])                         // → 0   (nothing cut)
  */
 export const adaptivePruneThreshold = (sortedDesc, sig = kElbowSig, factor = kMMFactor) => {
   const k = adaptivePruneCount(sortedDesc, sig, factor);

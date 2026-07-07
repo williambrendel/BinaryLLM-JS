@@ -8,29 +8,41 @@
 // did, then decomposes each token: words via the greedy peel, delimiters
 // literally.
 //
-// Dictionary format is chosen by extension (.bin -> binary, else text).
+// Dictionary format is chosen by extension (.bin -> binary, else text). A bare
+// dict filename (no directory component) is looked up in data/dictionaries/ by
+// default; pass a path with a directory to read elsewhere.
 //
 // Usage:
 //   node scripts/decompose.js <dict.txt|.bin> <text...>
 //   node scripts/decompose.js <dict.txt|.bin> -            # read text from stdin
 //
 // Examples:
-//   node scripts/decompose.js data/dict.txt "unhappily running"
-//   echo "the peppers" | node scripts/decompose.js data/dict.bin -
+//   node scripts/decompose.js dict.txt "unhappily running"    # -> data/dictionaries/dict.txt
+//   echo "the peppers" | node scripts/decompose.js dict.bin -
 // ============================================================================
 
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Kind, kindToString } from "../src/core/parts/kind.js";
 import { fromByteString } from "../src/core/parts/byteString.js";
 import { tokenizeStream, StreamTokenType } from "../src/core/parts/tokenize.js";
 import { loadDictText, loadDictBinary } from "../src/core/parts/dictionary.js";
 import { decomposeWord, decomposeDelimiter } from "../src/core/parts/decomposer.js";
 
+// Default directory for bare dict filenames: <repo>/data/dictionaries.
+const DEFAULT_DICT_DIR = path.resolve(fileURLToPath(import.meta.url), "..", "..", "data", "dictionaries");
+
 const usage = () => {
   process.stderr.write("usage: node scripts/decompose.js <dict.txt|.bin> <text...|->\n");
 };
 
-const loadDict = (p) => {
+// A bare filename (no directory component) resolves under data/dictionaries/.
+const resolveDict = (p) =>
+  path.dirname(p) === "." && !path.isAbsolute(p) ? path.join(DEFAULT_DICT_DIR, p) : p;
+
+const loadDict = (arg) => {
+  const p = resolveDict(arg);
   if (p.endsWith(".bin")) return loadDictBinary(new Uint8Array(fs.readFileSync(p)));
   // Read text dictionaries as latin1 so the on-disk bytes survive intact.
   return loadDictText(fs.readFileSync(p, "latin1"));
