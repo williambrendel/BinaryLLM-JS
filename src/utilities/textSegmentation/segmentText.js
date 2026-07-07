@@ -52,11 +52,11 @@
  * @see {@link detectOrderedHeader}
  */
 
-import Segment from "./Segment";
-import Section from "./Section";
-import Header from "./Header";
-import { protectDots, restore } from "./protectDots";
-import detectOrderedHeader from "./detectOrderedHeader";
+import Segment from "./Segment.js";
+import Section from "./Section.js";
+import Header from "./Header.js";
+import { protectDots, restore } from "./protectDots.js";
+import detectOrderedHeader from "./detectOrderedHeader.js";
 
 /**
  * @function segmentText

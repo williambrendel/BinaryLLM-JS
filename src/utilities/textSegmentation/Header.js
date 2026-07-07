@@ -26,7 +26,7 @@
  * @see {@link segmentMarkdownTextSection}
  */
 
-import Segment from "./Segment";
+import Segment from "./Segment.js";
 
 /**
  * @class Header

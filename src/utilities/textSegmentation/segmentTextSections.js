@@ -38,9 +38,9 @@
  * @see {@link Header} for heading metadata (level, title).
  */
 
-import segmentText from "./segmentText";
-import Section from "./Section";
-import Header from "./Header";
+import segmentText from "./segmentText.js";
+import Section from "./Section.js";
+import Header from "./Header.js";
 
 /**
  * @function segmentTextSections

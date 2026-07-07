@@ -1,7 +1,7 @@
 "use strict";
 
-import { interval, intersects, contains } from "./interval";
-import Segment from "./Segment";
+import { interval, intersects, contains } from "./interval.js";
+import Segment from "./Segment.js";
 
 /**
  * @file Section.js

@@ -21,7 +21,7 @@
 
 "use strict";
 
-import { interval, intersect, intersects, contains } from "./interval";
+import { interval, intersect, intersects, contains } from "./interval.js";
 
 /**
  * @class Segment
