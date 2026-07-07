@@ -8,15 +8,11 @@
 // word-level labels — the current word C and the next word — and a scale tag
 // (0 = sentence scope, 1 = paragraph scope).
 //
-// writeDataset emits the current format, SIG2. readDataset auto-detects and
-// reads both SIG2 and the older SIG1 (see below), so existing files keep
-// loading.
-//
-// ---- SIG2 (current): columnar + delta-varint --------------------------------
-// A struct-of-arrays layout: fields are grouped into columns (all scales, then
-// all current-word labels, …) so homogeneous values sit together (far better
-// gzip), and every count/label/id is an unsigned LEB128 varint. Band ids are
-// ascending, so each band stores gaps (delta) — small numbers, ~1 byte each.
+// Format "SIG2": columnar (struct-of-arrays) + delta-varint. Fields are grouped
+// into columns (all scales, then all current-word labels, …) so homogeneous
+// values sit together (better gzip), and every count/label/id is an unsigned
+// LEB128 varint. Band ids are ascending, so each band stores gaps (delta) —
+// small numbers, ~1 byte each.
 //
 //   HEADER: magic "SIG2", version u8=2, flags u8, reserved u16,
 //           F u32, V u32, N u32
@@ -28,20 +24,12 @@
 //     for band in [L,C,R]:
 //       pop[N]           : varint (band size)
 //       ids              : per record, `pop` delta-varints (ascending gaps)
-//
-// ---- SIG1 (legacy, read-only): row-major, fixed-width -----------------------
-//   HEADER: magic "SIG1", version u8=1, idWidth u8, reserved u16, F,V,N (u32)
-//   VOCAB (V): u16 len + bytes
-//   RECORDS (N): scale u8, curWord u32, nextWord u32,
-//                per band: pop u32 + pop*idWidth ids
 // ============================================================================
 
 import { sparseArrayType } from "../../utilities/sparseArrayType.js";
 
-const MAGIC2 = "SIG2";
-const MAGIC1 = "SIG1";
-const VERSION2 = 2;
-const VERSION1 = 1;
+const MAGIC = "SIG2";
+const VERSION = 2;
 export const NO_LABEL = 0xffffffff;
 
 const BANDS = ["L", "C", "R"];
@@ -137,8 +125,8 @@ export const writeDataset = ({ F, vocab, records }) => {
   const w = new ByteWriter();
   const N = records.length;
 
-  w.chars(MAGIC2);
-  w.u8(VERSION2);
+  w.chars(MAGIC);
+  w.u8(VERSION);
   w.u8(0); // flags
   w.u16(0); // reserved
   w.u32(F);
@@ -166,12 +154,21 @@ export const writeDataset = ({ F, vocab, records }) => {
   return w.done();
 };
 
-// ---- read (auto-detect SIG2 / SIG1) --------------------------------------
+// ---- read -----------------------------------------------------------------
 
-const readSig2 = (bytes) => {
+/**
+ * Parse a signature dataset (SIG2 format).
+ * @param {Uint8Array} bytes
+ * @returns {{F: number, vocab: string[], records: SignatureRecord[]}}
+ *   `vocab` words are byte-strings (use fromByteString to display).
+ */
+export const readDataset = (bytes) => {
+  if (String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) !== MAGIC) {
+    throw new Error("readDataset: bad magic (expected SIG2)");
+  }
   const r = new ByteReader(bytes, 4); // past magic
   const version = r.u8();
-  if (version !== VERSION2) throw new Error("readDataset: unsupported SIG2 version " + version);
+  if (version !== VERSION) throw new Error("readDataset: unsupported version " + version);
   r.u8(); // flags
   r.u16(); // reserved
   const F = r.u32();
@@ -218,53 +215,6 @@ const readSig2 = (bytes) => {
     records[i] = { scale: scale[i], curWord: cur[i], nextWord: next[i], L: bands.L[i], C: bands.C[i], R: bands.R[i] };
   }
   return { F, vocab, records };
-};
-
-const readSig1 = (bytes) => {
-  const r = new ByteReader(bytes, 4); // past magic
-  const version = r.u8();
-  if (version !== VERSION1) throw new Error("readDataset: unsupported SIG1 version " + version);
-  const idWidth = r.u8();
-  r.u16(); // reserved
-  const F = r.u32();
-  const V = r.u32();
-  const N = r.u32();
-  const readId = idWidth === 2 ? () => r.u16() : () => r.u32();
-  const Arr = sparseArrayType(F);
-
-  const vocab = new Array(V);
-  for (let i = 0; i < V; i++) vocab[i] = r.chars(r.u16());
-
-  const band = () => {
-    const pop = r.u32();
-    const b = new Arr(pop);
-    for (let i = 0; i < pop; i++) b[i] = readId();
-    return b;
-  };
-  const records = new Array(N);
-  for (let i = 0; i < N; i++) {
-    const scale = r.u8();
-    const curWord = r.u32();
-    const nextWord = r.u32();
-    const L = band();
-    const C = band();
-    const R = band();
-    records[i] = { scale, curWord, nextWord, L, C, R };
-  }
-  return { F, vocab, records };
-};
-
-/**
- * Parse a signature dataset (SIG2 or legacy SIG1 — auto-detected by magic).
- * @param {Uint8Array} bytes
- * @returns {{F: number, vocab: string[], records: SignatureRecord[]}}
- *   `vocab` words are byte-strings (use fromByteString to display).
- */
-export const readDataset = (bytes) => {
-  const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
-  if (magic === MAGIC2) return readSig2(bytes);
-  if (magic === MAGIC1) return readSig1(bytes);
-  throw new Error("readDataset: bad magic (expected SIG1 or SIG2)");
 };
 
 export default writeDataset;
