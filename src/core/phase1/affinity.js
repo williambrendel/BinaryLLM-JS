@@ -2,15 +2,15 @@
 
 /**
  * @file affinity.js
- * @brief §1.1–1.2 — the `w`-weighted unary log-odds `u` and the PMI-difference
- * affinity `M`, REBUILT each round (§10). No C⁺/C⁻ state, no downdate.
+ * @brief §1.1–1.2 — the `w`-weighted unary log-odds `u` and the PMI-difference affinity `M`, REBUILT each round.
  *
- *   u(b) = log( (p⁺_w(b)+α_r) / (p⁻(b)+α_r) )                      rate-smoothed log-odds
- *   M_ab = max(0, PMI⁺_w(a,b)) − max(0, PMI⁻(a,b))                 PMI-difference (each floored ≥0)
+ *   u(b)  = log( (p⁺_w(b)+α_r) / (p⁻(b)+α_r) )              rate-smoothed unary log-odds
+ *   M_ab  = PMI⁺_w(a,b) − PMI⁻(a,b)                          PMI difference
+ *   PMI(a,b) = log( p(a,b) / (p(a)·p(b)) )                   marginal-normalized association
  *
- * p⁺_w is the AdaBoost-weighted positive rate (weight w_i per context); p⁻ is
- * frozen. An edge exists iff `M_ab ≠ 0` (pair bound in positives → +, bound in
- * negatives → −, in neither → no edge). Bits index into `pPlus` for the matvec.
+ * p⁺_w is the AdaBoost-weighted positive rate (weight w_i per context); p⁻ is frozen. An edge exists iff
+ * `M_ab ≠ 0`. Bits index into `pPlus` for the matvec. (The marginal normalization inside PMI is load-bearing —
+ * it cancels common bits; a plain rate difference fails. The old max(0,·) flooring was CV-confirmed unnecessary.)
  */
 
 import { pairKey, PAIRK } from "./negSet.js";
@@ -22,7 +22,6 @@ import { pairKey, PAIRK } from "./negSet.js";
  * @param {{pPlus:number[], pset:Set<number>, negN:number, nMinus:Map, jMinus:Map}} neg
  * @param {object} [opts] @param {number} [opts.alphaR] - rate-smoothing (default 1/negN).
  * @returns {{u:Float64Array, edges:{i:Int32Array,j:Int32Array,m:Float64Array}, idx:Map<number,number>, n:number}}
- *   `u` indexed by P⁺ position; `edges` = COO of the symmetric M over P⁺ positions.
  */
 export const buildAffinity = (A, w, neg, opts = {}) => {
   const { pPlus, pset, negN, nMinus, jMinus } = neg;
@@ -40,73 +39,30 @@ export const buildAffinity = (A, w, neg, opts = {}) => {
     for (let i = 0; i < pos.length; i++) for (let j = i + 1; j < pos.length; j++) { const k = pos[i] * pPlus.length + pos[j]; jPos.set(k, (jPos.get(k) || 0) + wi); }
   }
 
-  // metric: "pmi" (default) = floored-PMI difference + log-odds unary. "rate" = plain rate difference (p⁺−p⁻),
-  // no logs/flooring. "rawpmi" = PMI difference WITHOUT the max(0,·) flooring. metricScale rescales u & M to keep
-  // the u/M/ρ balance comparable across metrics (simpler metrics live on a different numeric scale).
-  const metric = opts.metric || "pmi", mScale = opts.metricScale ?? 1;
-  const unary = (pp, pm) => (metric === "rate" ? pp - pm : Math.log((pp + alphaR) / (pm + alphaR)));
-  const pairM = (jw, mi, mj, jn, ni, nj) => {                             // symmetric pair affinity per metric
-    if (metric === "rate") return jw / W - jn / negN;
-    // codds: co-occurrence LOG-ODDS log(p⁺(a,b)/p⁻(a,b)) — the pairwise analog of the unary log-odds u.
-    // SAME metric as u (one unary, one pairwise), no marginal normalization, no flooring. The ratio (vs neg
-    // co-occurrence) still cancels common bits, unlike the raw rate-difference.
-    if (metric === "codds") return Math.log((jw / W + alphaR) / (jn / negN + alphaR));
+  // unary log-odds
+  const u = new Float64Array(n);
+  for (let p = 0; p < n; p++) { const pp = mPos[p] / (W || 1), pm = (nMinus.get(pPlus[p]) || 0) / (negN || 1); u[p] = Math.log((pp + alphaR) / (pm + alphaR)); }
+
+  // pairwise PMI difference (no flooring). Candidate pairs = observed in positives OR negatives.
+  const pairM = (jw, mi, mj, jn, ni, nj) => {
     const pp = jw > 0 ? Math.log((jw / W) / ((mi / W) * (mj / W))) : 0;
     const pn = jn > 0 ? Math.log((jn / negN) / ((ni / negN) * (nj / negN))) : 0;
-    return metric === "rawpmi" ? pp - pn : (pp > 0 ? pp : 0) - (pn > 0 ? pn : 0);
+    return pp - pn;
   };
-
-  // unary
-  const u = new Float64Array(n);
-  for (let p = 0; p < n; p++) { const pp = mPos[p] / (W || 1), pm = (nMinus.get(pPlus[p]) || 0) / (negN || 1); u[p] = unary(pp, pm) * mScale; }
-
-  // pairwise affinity. Candidate pairs = observed in positives OR negatives.
   const seen = new Set(), Iarr = [], Jarr = [], Marr = [];
-  const emit = (pi, pj, mval) => { if (mval !== 0) { Iarr.push(pi); Jarr.push(pj); Marr.push(mval * mScale); } };
-  // positive-observed pairs
-  for (const [k, jw] of jPos) {
+  const emit = (pi, pj, mval) => { if (mval !== 0) { Iarr.push(pi); Jarr.push(pj); Marr.push(mval); } };
+  for (const [k, jw] of jPos) {                                          // positive-observed pairs
     const pi = Math.floor(k / pPlus.length), pj = k % pPlus.length; seen.add(k);
     const nk = pairKey(pPlus[pi], pPlus[pj]); const jn = jMinus.get(nk) || 0;
     emit(pi, pj, pairM(jw, mPos[pi], mPos[pj], jn, nMinus.get(pPlus[pi]) || 0, nMinus.get(pPlus[pj]) || 0));
   }
-  // negative-only pairs (both bits in P⁺, not co-observed in positives) → repulsive
-  for (const [nk, jn] of jMinus) {
+  for (const [nk, jn] of jMinus) {                                       // negative-only pairs → repulsive
     const a = Math.floor(nk / PAIRK), b = nk % PAIRK;
     const pi = idx.get(a), pj = idx.get(b); if (pi === undefined || pj === undefined) continue;
     const key = pi < pj ? pi * pPlus.length + pj : pj * pPlus.length + pi;
     if (seen.has(key)) continue;
     emit(Math.min(pi, pj), Math.max(pi, pj), pairM(0, mPos[pi], mPos[pj], jn, nMinus.get(a) || 0, nMinus.get(b) || 0));
   }
-
-  // §1.3 — soft precondition (instead of hard ban): scale common bits' u and incident M toward 0 by
-  // coefficient c∈[0,1]. c=1 keep, c=0 ≡ ban (π=−ρx → decays). A common bit survives only if its genuine
-  // pairwise signal clears the reduced bar — signal-proportional admission, no frequency cutoff.
-  const ccU = opts.commonCoefU ?? opts.commonCoef ?? 1, ccM = opts.commonCoefM ?? opts.commonCoef ?? 1, CS = opts.commonSet;
-  if (CS && CS.size && (ccU !== 1 || ccM !== 1)) {                              // decoupled: unary vs edge channel
-    if (ccU !== 1) for (let p = 0; p < n; p++) if (CS.has(pPlus[p])) u[p] *= ccU;
-    if (ccM !== 1) for (let e = 0; e < Marr.length; e++) { let f = 1; if (CS.has(pPlus[Iarr[e]])) f *= ccM; if (CS.has(pPlus[Jarr[e]])) f *= ccM; if (f !== 1) Marr[e] *= f; }
-  }
-
-  // peel/downdate: bits claimed by accepted parts are discouraged so the replicator finds a DIFFERENT clique
-  // next round. excludeCoef=0 → HARD peel (u→−∞, edges→0); 0<c<1 → SOFT (scale u & incident M ×c toward 0,
-  // a nudge not a ban — the bit can return if strongly re-implicated).
-  const excl = opts.exclude, ec = opts.excludeCoef ?? 0;
-  if (excl && excl.size) {
-    if (ec > 0) {
-      for (let p = 0; p < n; p++) if (excl.has(pPlus[p])) u[p] *= ec;
-      for (let e = 0; e < Marr.length; e++) { let f = 1; if (excl.has(pPlus[Iarr[e]])) f *= ec; if (excl.has(pPlus[Jarr[e]])) f *= ec; if (f !== 1) Marr[e] *= f; }
-    } else {
-      for (let p = 0; p < n; p++) if (excl.has(pPlus[p])) u[p] = -1e9;
-      for (let e = 0; e < Marr.length; e++) if (excl.has(pPlus[Iarr[e]]) || excl.has(pPlus[Jarr[e]])) Marr[e] = 0;
-    }
-  }
-
-  // edge normalization (changes the objective — NON-uniform transforms only; a global rescale is absorbed by the
-  //  replicator step size and is a no-op on the parts). "tanh": squash outlier PMI edges to (−1,1) at temp T;
-  //  "sym": degree-normalize M_ab/√(D_a·D_b) (spectral-clustering style, down-weights hub bits).
-  const nrm = opts.normEdges;
-  if (nrm === "tanh") { const T = opts.normT ?? 2; for (let e = 0; e < Marr.length; e++) Marr[e] = Math.tanh(Marr[e] / T); }
-  else if (nrm === "sym") { const D = new Float64Array(n); for (let e = 0; e < Marr.length; e++) { const a = Math.abs(Marr[e]); D[Iarr[e]] += a; D[Jarr[e]] += a; } for (let e = 0; e < Marr.length; e++) { const d = Math.sqrt((D[Iarr[e]] || 1) * (D[Jarr[e]] || 1)); Marr[e] /= d || 1; } }
 
   return { u, edges: { i: Int32Array.from(Iarr), j: Int32Array.from(Jarr), m: Float64Array.from(Marr) }, idx, n };
 };
