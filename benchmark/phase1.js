@@ -42,6 +42,37 @@ const main = () => {
   const stmp = new Int32Array(DIM).fill(-1); let sp = 0;
   const feat = (s, t) => { sp++; const y = []; for (let dd = 1; dd <= D; dd++) { const q = t - dd; if (q < 0) break; const off = band(dd) * F; for (const a of partsOf(s[q])) { const b = a + off; if (stmp[b] !== sp) { stmp[b] = sp; y.push(b); } } } return y.sort((a, b) => a - b); };
 
+  // ── DEPLOYCV: the DEPLOYED config (pure fitClass defaults: exp + support-early-stop + rawpmi + θ-head),
+  //    4-fold cross-word held-out. The refreshed headline numbers for the settled extractor. ──
+  if (process.env.DEPLOYCV === "1") {
+    const RHO = Number(process.env.RHO || 80), DDx = Number(process.env.DELTA || 0.05), DBx = Number(process.env.DBAND || 0.05);
+    const TARGETS = (process.env.TARGETS || "time,world,state,music,century,river,government,bank,physics,philosophy,hydrogen").split(",");
+    const tset = new Set(TARGETS), NEGP = Number(process.env.NEGPOOL || 60000);
+    const classA = new Map(TARGETS.map((t) => [t, []])), negPool = [], bitCount = new Map();
+    let Ntot = 0, ni = 0; const addC = (y) => { Ntot++; for (const b of y) bitCount.set(b, (bitCount.get(b) || 0) + 1); return y; };
+    for (const s of sents) for (let t = 1; t < s.length; t++) { if (tset.has(s[t])) classA.get(s[t]).push(addC(feat(s, t))); else if (ni++ % Math.max(1, Math.floor((sents.length * 8) / NEGP)) === 0) negPool.push(addC(feat(s, t))); }
+    const Mg = new Set(); for (const [b, c] of bitCount) if (c / Ntot > DDx) Mg.add(b);
+    const rate = (fn, pool) => (pool.length ? pool.filter(fn).length / pool.length : 0);
+    const w = process.stdout;
+    w.write(`# DEPLOYCV (deployed defaults, 4-fold held-out) | words=${TARGETS.length} negPool=${negPool.length}\n`);
+    w.write(`  word          |A|    K   trainRec  recHeld   confFP    ms/fit\n`);
+    let sR = 0, sF = 0, sTr = 0, sK = 0, sMs = 0, nw = 0;
+    for (const word of TARGETS) {
+      const Aw = classA.get(word); if (Aw.length < 8) continue;
+      let rS = 0, fS = 0, trS = 0, kS = 0, msS = 0;
+      for (let f = 0; f < 4; f++) {
+        const fa = [], te = []; for (let k = 0; k < Aw.length; k++) (k % 4 === f ? te : fa).push(Aw[k]);
+        const t0 = process.hrtime.bigint(); const fit = fitClass(fa, negPool, Mg, { rho: RHO, delta: DBx }); msS += Number(process.hrtime.bigint() - t0) / 1e6;
+        rS += rate((y) => fit.head.fires(y), te); fS += rate((y) => fit.head.fires(y), fit.neg.Neg); trS += rate((y) => fit.head.fires(y), fa); kS += fit.G.length;
+      }
+      const rec = 100 * rS / 4, fp = 100 * fS / 4, tr = 100 * trS / 4, k = kS / 4, ms = msS / 4;
+      sR += rec; sF += fp; sTr += tr; sK += k; sMs += ms; nw++;
+      w.write(`  ${word.padEnd(12)}${String(Aw.length).padStart(5)}   ${k.toFixed(0).padStart(2)}   ${tr.toFixed(1).padStart(5)}%   ${rec.toFixed(1).padStart(5)}%   ${fp.toFixed(1).padStart(5)}%   ${ms.toFixed(0).padStart(5)}\n`);
+    }
+    w.write(`  ${"MEAN".padEnd(12)}${"".padStart(5)}   ${(sK / nw).toFixed(0).padStart(2)}   ${(sTr / nw).toFixed(1).padStart(5)}%   ${(sR / nw).toFixed(1).padStart(5)}%   ${(sF / nw).toFixed(1).padStart(5)}%   ${(sMs / nw).toFixed(0).padStart(5)}\n`);
+    return;
+  }
+
   // ── METRICCV: affinity metric pmi vs rawpmi vs codds (consistent log-odds), 4-fold cross-word, held-out
   //    through the α-sum head. Decides whether the simpler/consistent metric can replace PMI-difference. ──
   if (process.env.METRICCV === "1") {
