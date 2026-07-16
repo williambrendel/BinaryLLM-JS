@@ -5,7 +5,7 @@ signed PMI-difference bit-graph with a unary log-odds tilt) + AdaBoost sample re
 **Scope:** find `{p⁺_i}` parts only (`p⁻` = ∅, deferred to phase 2). Representation = 3F canon
 `[L|L1∪L2|C]`. Head = α-weighted sum.
 **Deployed entry point:** `src/core/phase1/fit.js` `fitClass(A, negPool, Mglob, opts)`.
-**Validation:** `benchmark/phase1.js` on `bank`, `state`, `time` (wiki_4m, english.txt dict). Structural
+**Validation:** `benchmark/phase1/phase1.js` on `bank`, `state`, `time` (wiki_4m, english.txt dict). Structural
 diagnostics (T1/T2/T7) on a single split; all **operating-point decisions are 5-fold CV** (interleaved
 folds; per fold, internal train/val split for early-stop + θ, test = held fold). `|A|` = 500 / 2600 / 4978.
 

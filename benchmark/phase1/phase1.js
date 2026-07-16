@@ -12,13 +12,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadDictText, loadDictBinary } from "../src/core/parts/dictionary.js";
-import { tokenizeStream, StreamTokenType, asciiLowercase } from "../src/core/parts/tokenize.js";
-import { encodeWord } from "../src/core/signatures/wordEncoder.js";
-import { segmentText } from "../src/utilities/textSegmentation/segmentText.js";
-import fitClass from "../src/core/phase1/fit.js";
+import { loadDictText, loadDictBinary } from "../../src/core/parts/dictionary.js";
+import { tokenizeStream, StreamTokenType, asciiLowercase } from "../../src/core/parts/tokenize.js";
+import { encodeWord } from "../../src/core/signatures/wordEncoder.js";
+import { segmentText } from "../../src/utilities/textSegmentation/segmentText.js";
+import fitClass from "../../src/core/phase1/fit.js";
 
-const REPO = path.resolve(fileURLToPath(import.meta.url), "..", "..");
+const REPO = path.resolve(fileURLToPath(import.meta.url), "..", "..", "..");
 const DICT_DIR = path.join(REPO, "data", "dictionaries");
 const resolveIn = (p, d) => (path.dirname(p) === "." && !path.isAbsolute(p) ? path.join(d, p) : p);
 const loadDict = (a) => { const p = resolveIn(a, DICT_DIR); return p.endsWith(".bin") ? loadDictBinary(new Uint8Array(fs.readFileSync(p))) : loadDictText(fs.readFileSync(p, "latin1")); };

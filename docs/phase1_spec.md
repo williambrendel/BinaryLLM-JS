@@ -6,7 +6,7 @@ algorithm (§8), implemented as a benchmark mode and validated on a single struc
 or wired into `fitClass`** · `[MEASURED]` a mechanistic finding from one or more runs · `[OPEN]` untested
 lead. Do not read a `[CANDIDATE]`/`[MEASURED]` result as production-validated.
 
-Implementation spec for the JS trainer (`src/core/phase1/*`, driver `benchmark/phase1.js`). Breaks the blunt
+Implementation spec for the JS trainer (`src/core/phase1/*`, driver `benchmark/phase1/phase1.js`). Breaks the blunt
 positive union `p⁺` into weak parts using Pelillo replicator dynamics on a signed bit-affinity graph with
 unary potentials, then boosts them by **AdaBoost sample reweighting** (never peeling the positive set). No
 C++, no RNN. Dynamics, the `−ρI` regularizer, and the positivity shift follow **Pavan & Pelillo, "Dominant
@@ -14,7 +14,7 @@ Sets and Hierarchical Clustering," ICCV 2003**. The `ρ > s₀−1` size heurist
 bounds but does **not** transfer verbatim to our signed `M` — a starting point confirmed empirically, not a
 cited guarantee.
 
-Signatures are the **3F canon** `[L | L1∪L2 | C]` (three positional bands, `benchmark/phase1.js` `feat()`):
+Signatures are the **3F canon** `[L | L1∪L2 | C]` (three positional bands, `benchmark/phase1/phase1.js` `feat()`):
 band **F2** = adjacent word (dd=1), **F1** = near (dd 2–3), **F0** = far (dd ≥ 4); each band spans the full
 `F`-dim part space, so `|3F| = 3·F`. On the reference dict `F = 33,304`, `3F = 99,912`.
 
@@ -448,7 +448,7 @@ replicator `O(nnz(M)+n)` per step (one sparse matvec, active-set-shrunk). `Neg`,
 Total `O(T·|A|·density²)`, `T ≈ tens`, density 1–3%.
 
 ## 11. Evaluation hooks + established findings
-Driver modes (`benchmark/phase1.js`): `CV` (5-fold ban/keep/keep+es), `E2E` (deployed stats), `DIST`
+Driver modes (`benchmark/phase1/phase1.js`): `CV` (5-fold ban/keep/keep+es), `E2E` (deployed stats), `DIST`
 (α/|Q| shape), `OVERLAP` (signature intra/cross per band), `XCLASS` (cross-class part overlap), `BANDMASK`,
 `BANDS`, `COREWASTE`, `COREDECOMP`, `TAIL`, `TIGHTCORE`, `TIGHTBOOST`, `DISJTIGHT`, `COREPART`, `NEFF`,
 `COMPARE50`, `ADAPTCORE`, `TFCV`/`FPCV`/`TRIMCV`/`CORECV`/`RTCV`, `SOFTPEEL`, `XSTAR`.
@@ -506,7 +506,7 @@ further where the class decomposes.
 - `phase1/boost.js` — reweight loop; dual-bound; ε-clip; opts `recallTau/tauFloor/peel/peelCoef/coreT/
   commonCoef*/scaffoldOnly`.
 - `phase1/head.js` — α-sum head `S_τ=Σα_k h_k > θ`; max-pool readout for A/B.
-- `benchmark/phase1.js` — the driver and all evaluation modes (§11); the `[CANDIDATE]` adaptive-core lives
+- `benchmark/phase1/phase1.js` — the driver and all evaluation modes (§11); the `[CANDIDATE]` adaptive-core lives
   here as `ADAPTCORE=1`.
 - `__tests__/core/phase1/fit.test.js` — 4 tests, green. `data/phase1_targets.txt` — the canon.
 - Report: `docs/phase1_report.md` (measured tables, reproducible via the driver flags).
