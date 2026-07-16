@@ -31,5 +31,7 @@ validation θ-tune.
 | `boost.js` | §7 | AdaBoost reweighting loop producing the part ensemble `G` |
 | `head.js` | §7.2 | α-weighted sum head `S=Σα_k·1[\|Q_k∧x\|≥m_k] > θ` |
 | `fit.js` | §8 | **deployed entry** `fitClass` — split → boost → val early-stop → θ-tune |
+| `parallelFit.js` + `fitWorker.js` | — | **parallel per-word extraction** over a worker pool — featurize once, share the read-only negPool zero-copy via `SharedArrayBuffer`, fan `fitClass` out across cores (deterministic ⇒ identical to sequential) |
 
 Unit tests: `__tests__/core/phase1/*.test.js`. Evaluation driver: `benchmark/phase1/phase1.js`.
+Parallel verification + speedup: `benchmark/phase1/parallelBench.js`.
