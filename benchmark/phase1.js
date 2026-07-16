@@ -42,6 +42,40 @@ const main = () => {
   const stmp = new Int32Array(DIM).fill(-1); let sp = 0;
   const feat = (s, t) => { sp++; const y = []; for (let dd = 1; dd <= D; dd++) { const q = t - dd; if (q < 0) break; const off = band(dd) * F; for (const a of partsOf(s[q])) { const b = a + off; if (stmp[b] !== sp) { stmp[b] = sp; y.push(b); } } } return y.sort((a, b) => a - b); };
 
+  // ── METRICCV: affinity metric pmi vs rawpmi vs codds (consistent log-odds), 4-fold cross-word, held-out
+  //    through the α-sum head. Decides whether the simpler/consistent metric can replace PMI-difference. ──
+  if (process.env.METRICCV === "1") {
+    const RHO = Number(process.env.RHO || 80), DDx = Number(process.env.DELTA || 0.05), DBx = Number(process.env.DBAND || 0.05);
+    const TARGETS = (process.env.TARGETS || "time,world,state,music,century,river,government,bank,physics,philosophy,hydrogen").split(",");
+    const tset = new Set(TARGETS), NEGP = Number(process.env.NEGPOOL || 60000);
+    const classA = new Map(TARGETS.map((t) => [t, []])), negPool = [], bitCount = new Map();
+    let Ntot = 0, ni = 0; const addC = (y) => { Ntot++; for (const b of y) bitCount.set(b, (bitCount.get(b) || 0) + 1); return y; };
+    for (const s of sents) for (let t = 1; t < s.length; t++) { if (tset.has(s[t])) classA.get(s[t]).push(addC(feat(s, t))); else if (ni++ % Math.max(1, Math.floor((sents.length * 8) / NEGP)) === 0) negPool.push(addC(feat(s, t))); }
+    const Mg = new Set(); for (const [b, c] of bitCount) if (c / Ntot > DDx) Mg.add(b);
+    const rate = (fn, pool) => (pool.length ? pool.filter(fn).length / pool.length : 0);
+    const mets = ["pmi", "rawpmi", "codds"];
+    const w = process.stdout;
+    w.write(`# METRICCV (pmi vs rawpmi vs codds, α-sum head, 4-fold held-out) | words=${TARGETS.length} negPool=${negPool.length} | recHeld%/FP%\n`);
+    w.write(`  word          |A|    ${mets.map((m) => m.padEnd(14)).join("")}\n`);
+    const agg = mets.map(() => ({ rec: 0, fp: 0, nw: 0 }));
+    for (const word of TARGETS) {
+      const Aw = classA.get(word); if (Aw.length < 8) continue;
+      const cells = mets.map((met, ci) => {
+        let rS = 0, fS = 0;
+        for (let f = 0; f < 4; f++) {
+          const fa = [], te = []; for (let k = 0; k < Aw.length; k++) (k % 4 === f ? te : fa).push(Aw[k]);
+          const fit = fitClass(fa, negPool, Mg, { rho: RHO, delta: DBx, metric: met });
+          rS += rate((y) => fit.head.fires(y), te); fS += rate((y) => fit.head.fires(y), fit.neg.Neg);
+        }
+        const rec = 100 * rS / 4, fp = 100 * fS / 4; agg[ci].rec += rec; agg[ci].fp += fp; agg[ci].nw++;
+        return `${rec.toFixed(1)}/${fp.toFixed(1)}`.padEnd(14);
+      });
+      w.write(`  ${word.padEnd(12)}${String(Aw.length).padStart(5)}    ${cells.join("")}\n`);
+    }
+    w.write(`  ${"MEAN".padEnd(12)}${"".padStart(5)}    ${agg.map((a) => `${(a.rec / a.nw).toFixed(1)}/${(a.fp / a.nw).toFixed(1)}`.padEnd(14)).join("")}\n`);
+    return;
+  }
+
   // ── ADAPTCV: deployed boost vs adaptive-core (§8) — BOTH through the α-sum head (head.fires), 4-fold
   //    cross-word held-out. The real comparison: does FP-aware disjoint spawning beat post-hoc θ-tuning? ──
   if (process.env.ADAPTCV === "1") {
@@ -173,6 +207,112 @@ const main = () => {
   const Mglob = new Set(); for (const [b, c] of bitCount) if (c / Ntot > DD) Mglob.add(b);   // common-word bits
 
   const w = process.stdout;
+
+  // ── METRIC: is the PMI-difference / log-odds machinery earned? Compare vs plain rate-difference and unfloored
+  //    PMI, sweeping metricScale (simpler metrics live on a different scale) → round-0 cluster recall/FP. ──
+  if (process.env.METRIC === "1") {
+    const RHO = Number(process.env.RHO || 80);
+    const neg = buildNegSet(A, negPool, Mglob, { delta: DBAND, maskNodes: new Set() });
+    const wU = new Float64Array(A.length).fill(1 / A.length);
+    const evalS = (edges, u2) => { const r = replicate(u2, edges, { solver: "exp", rho: RHO, maxIter: 1000 }); const bits = r.Q.map((p) => neg.pPlus[p]).sort((a, b) => a - b); const rec = bits.length ? A.filter((y) => andCount(y, bits) >= 1).length / A.length : 0; const fp = bits.length ? neg.Neg.filter((y) => andCount(y, bits) >= 1).length / neg.Neg.length : 0; return `|Q|=${String(bits.length).padStart(4)} rec=${(100 * rec).toFixed(0)}% fp=${(100 * fp).toFixed(0)}%`; };
+    w.write(`# METRIC (PMI vs rate vs rawpmi) | TARGET=${TARGET} |A|=${A.length}\n`);
+    for (const [met, scales] of [["pmi", [1]], ["rawpmi", [1]], ["codds", [0.5, 1, 2]], ["rate", [50, 200]]]) {
+      for (const sc of scales) {
+        const aff = buildAffinity(A, wU, neg, { commonSet: neg.DtauSel, metric: met, metricScale: sc });
+        let mn = 0, mx = 0; for (let e = 0; e < aff.edges.m.length; e++) { if (aff.edges.m[e] < mn) mn = aff.edges.m[e]; if (aff.edges.m[e] > mx) mx = aff.edges.m[e]; }
+        w.write(`  ${met.padEnd(7)} scale=${String(sc).padStart(4)} (M∈[${mn.toFixed(1)},${mx.toFixed(1)}]) : ${evalS(aff.edges, aff.u)}\n`);
+      }
+    }
+    // through the deployed head (held split): does dropping the flooring (rawpmi) hold end-to-end?
+    const fitA = [], test = []; for (let k = 0; k < A.length; k++) (k % 4 === 3 ? test : fitA).push(A[k]);
+    const rate2 = (pred, pool) => (pool.length ? pool.filter(pred).length / pool.length : 0);
+    w.write(`  — through α-sum head (held split) —\n`);
+    for (const met of ["pmi", "rawpmi", "codds"]) {
+      const fit = fitClass(fitA, negPool, Mglob, { rho: RHO, delta: DBAND, metric: met });
+      w.write(`    ${met.padEnd(7)}: K=${fit.G.length} recHeld=${(100 * rate2((y) => fit.head.fires(y), test)).toFixed(1)}% confFP=${(100 * rate2((y) => fit.head.fires(y), fit.neg.Neg)).toFixed(1)}%\n`);
+    }
+    return;
+  }
+
+  // ── DISJOINT: two populations, BOTH with the full discriminative payoff (u+Mx−ρx), coupled ONLY by a
+  //    mutual-exclusion penalty −μ·(other) → forced onto DISJOINT bit-sets = a JOINT 2-way partition (vs greedy
+  //    peel). Do two complementary discriminative clusters cover more at controlled FP? ──
+  if (process.env.DISJOINT === "1") {
+    const RHO = Number(process.env.RHO || 80);
+    const neg = buildNegSet(A, negPool, Mglob, { delta: DBAND, maskNodes: new Set() });
+    const wU = new Float64Array(A.length).fill(1 / A.length);
+    const { u, edges, n } = buildAffinity(A, wU, neg, { commonSet: neg.DtauSel });
+    const { i, j, m } = edges;
+    const mvM = (v, out) => { out.fill(0); for (let e = 0; e < m.length; e++) { out[i[e]] += m[e] * v[j[e]]; out[j[e]] += m[e] * v[i[e]]; } };
+    const expStep = (x, pay) => { let mx = -Infinity; for (let p = 0; p < n; p++) if (x[p] > 0 && pay[p] > mx) mx = pay[p]; let Z = 0; const nx = new Float64Array(n); for (let p = 0; p < n; p++) { const e = x[p] > 0 ? x[p] * Math.exp(pay[p] - mx) : 0; nx[p] = e; Z += e; } for (let p = 0; p < n; p++) nx[p] /= (Z || 1); return nx; };
+    const suppOf = (x) => { const t = 1e-6 / n; const s = []; for (let p = 0; p < n; p++) if (x[p] > t) s.push(p); return s; };
+    const bitsOf = (idxs) => idxs.map((p) => neg.pPlus[p]).sort((a, b) => a - b);
+    const recfp = (bits) => [bits.length ? A.filter((y) => andCount(y, bits) >= 1).length / A.length : 0, bits.length ? neg.Neg.filter((y) => andCount(y, bits) >= 1).length / neg.Neg.length : 0];
+    const jac = (a, b) => { const B = new Set(b); let it = 0; for (const x of a) if (B.has(x)) it++; const un = a.length + b.length - it; return un ? it / un : 0; };
+    w.write(`# DISJOINT (joint 2-way partition via mutual exclusion) | TARGET=${TARGET} |A|=${A.length} n=${n}\n`);
+    const rb = replicate(u, edges, { solver: "exp", rho: RHO, maxIter: 1000 });
+    const [rbr, rbf] = recfp(bitsOf(rb.Q));
+    w.write(`  single-pop: |Q|=${rb.Q.length} rec=${(100 * rbr).toFixed(0)}% fp=${(100 * rbf).toFixed(0)}%\n`);
+    // DISJOINT SEED: split the single-pop cluster's bits (by weight rank) alternately into x-seed and y-seed
+    const ord = rb.Q.map((p, k) => [p, rb.wPart[k]]).sort((a, b) => b[1] - a[1]).map((e) => e[0]);
+    const Mx = new Float64Array(n), My = new Float64Array(n);
+    for (const MU of [0, 5, 20, 50, 100]) {
+      let x = new Float64Array(n).fill(1e-6 / n), y = new Float64Array(n).fill(1e-6 / n);
+      ord.forEach((p, k) => { if (k % 2 === 0) x[p] = 1; else y[p] = 1; });     // hard-disjoint seeds
+      let sx = 0, sy = 0; for (let p = 0; p < n; p++) { sx += x[p]; sy += y[p]; } for (let p = 0; p < n; p++) { x[p] /= sx; y[p] /= sy; }
+      for (let t = 0; t < 1000; t++) {
+        mvM(x, Mx); mvM(y, My); const xp = new Float64Array(n), yp = new Float64Array(n);
+        for (let p = 0; p < n; p++) { xp[p] = u[p] + Mx[p] - RHO * x[p] - MU * y[p]; yp[p] = u[p] + My[p] - RHO * y[p] - MU * x[p]; }
+        x = expStep(x, xp); y = expStep(y, yp);
+      }
+      const bx = bitsOf(suppOf(x)), by = bitsOf(suppOf(y)), bu = [...new Set([...bx, ...by])].sort((a, b) => a - b);
+      const [xr, xf] = recfp(bx), [yr, yf] = recfp(by), [ur, uf] = recfp(bu);
+      w.write(`  μ=${String(MU).padStart(2)}: x[${bx.length}b ${(100 * xr).toFixed(0)}/${(100 * xf).toFixed(0)}] y[${by.length}b ${(100 * yr).toFixed(0)}/${(100 * yf).toFixed(0)}] overlap=${jac(bx, by).toFixed(2)} UNION[${bu.length}b rec=${(100 * ur).toFixed(0)}% fp=${(100 * uf).toFixed(0)}%]\n`);
+    }
+    return;
+  }
+
+  // ── BIMATRIX: two-population game — split M into attractive M⁺ and repulsive M⁻, optimize cohesion vs
+  //    repulsion JOINTLY (vs single-pop M=M⁺−M⁻). Prototype: measure the x-cluster recall/FP vs baseline. ──
+  if (process.env.BIMATRIX === "1") {
+    const RHO = Number(process.env.RHO || 80);
+    const neg = buildNegSet(A, negPool, Mglob, { delta: DBAND, maskNodes: new Set() });
+    const wU = new Float64Array(A.length).fill(1 / A.length);
+    const { u, edges, n } = buildAffinity(A, wU, neg, { commonSet: neg.DtauSel });
+    const { i, j, m } = edges;
+    const mvPos = (v, out) => { out.fill(0); for (let e = 0; e < m.length; e++) if (m[e] > 0) { out[i[e]] += m[e] * v[j[e]]; out[j[e]] += m[e] * v[i[e]]; } };
+    const mvNeg = (v, out) => { out.fill(0); for (let e = 0; e < m.length; e++) if (m[e] < 0) { out[i[e]] += -m[e] * v[j[e]]; out[j[e]] += -m[e] * v[i[e]]; } };
+    const expStep = (x, pay) => { let mx = -Infinity; for (let p = 0; p < n; p++) if (x[p] > 0 && pay[p] > mx) mx = pay[p]; let Z = 0; const nx = new Float64Array(n); for (let p = 0; p < n; p++) { const e = x[p] > 0 ? x[p] * Math.exp(pay[p] - mx) : 0; nx[p] = e; Z += e; } for (let p = 0; p < n; p++) nx[p] /= (Z || 1); return nx; };
+    const suppOf = (x) => { const t = 1e-6 / n; const s = []; for (let p = 0; p < n; p++) if (x[p] > t) s.push(p); return s; };
+    const evalS = (idxs) => { const bits = idxs.map((p) => neg.pPlus[p]).sort((a, b) => a - b); const rec = bits.length ? A.filter((y) => andCount(y, bits) >= 1).length / A.length : 0; const fp = bits.length ? neg.Neg.filter((y) => andCount(y, bits) >= 1).length / neg.Neg.length : 0; return `|Q|=${String(bits.length).padStart(4)} rec=${(100 * rec).toFixed(0)}% fp=${(100 * fp).toFixed(0)}%`; };
+    // dissociate the unary too: u = u⁺ − u⁻, u⁺=log(p⁺+αR)→x (attraction), u⁻=log(p⁻+αR)→y (repulsion)
+    const idxMap = new Map(); neg.pPlus.forEach((b, p) => idxMap.set(b, p));
+    const posCnt = new Float64Array(n); for (const y of A) for (const b of y) { const p = idxMap.get(b); if (p !== undefined) posCnt[p]++; }
+    const aR = 1 / neg.negN, uP = new Float64Array(n), uM = new Float64Array(n);
+    for (let p = 0; p < n; p++) { uP[p] = Math.log(posCnt[p] / A.length + aR); uM[p] = Math.log((neg.nMinus.get(neg.pPlus[p]) || 0) / neg.negN + aR); }
+    w.write(`# BIMATRIX (two-population M⁺/M⁻, u⁺/u⁻) | TARGET=${TARGET} |A|=${A.length} n=${n}\n`);
+    const rb = replicate(u, edges, { solver: "exp", rho: RHO, maxIter: 1000 });
+    w.write(`  single-pop M (baseline) : ${evalS(rb.Q)}\n`);
+    const px = new Float64Array(n), nx = new Float64Array(n), px2 = new Float64Array(n), ny2 = new Float64Array(n);
+    // x-payoff carries the unary u + the −ρx spread regularizer (what keeps single-pop distributed); y marks the
+    // repulsive structure (M⁻x, spread by −ρy). plain: x←M⁺y. adversarial: x←M⁺x − λ·M⁻y (penalize overlap with y).
+    // unary-assignment variants. x: xU + M⁺x − λ(M⁻y) − ρx. y: yU + M⁻x − ρy. Eval BOTH populations' clusters.
+    const uNeg = new Float64Array(n); for (let p = 0; p < n; p++) uNeg[p] = -u[p];
+    const modes = [["dissoc x=u⁺,y=u⁻", uP, uM], ["SWAP  x=u⁻,y=u⁺", uM, uP], ["opposite x=u,y=−u", u, uNeg]];
+    for (const [mn, xU, yU] of modes) {
+      for (const LAM of [1, 1.4, 2]) {
+        let x = new Float64Array(n).fill(1 / n), y = new Float64Array(n).fill(1 / n);
+        for (let t = 0; t < 1000; t++) {
+          mvNeg(x, nx); const yp = new Float64Array(n); for (let p = 0; p < n; p++) yp[p] = yU[p] + nx[p] - RHO * y[p]; const yn = expStep(y, yp);
+          mvPos(x, px2); mvNeg(y, ny2); const xp = new Float64Array(n);
+          for (let p = 0; p < n; p++) xp[p] = xU[p] + px2[p] - LAM * ny2[p] - RHO * x[p];
+          x = expStep(x, xp); y = yn;
+        }
+        w.write(`  ${mn.padEnd(18)} λ=${LAM} : x[${evalS(suppOf(x))}]  y[${evalS(suppOf(y))}]\n`);
+      }
+    }
+    return;
+  }
 
   // ── DOMSET: pure-M dominant set (tiny tight cliques, recall<50%) + augment-to-N%-recall each AdaBoost round,
   //    vs deployed — through the real α-sum head. Tests the "shift-concentrate then extend the cores" idea. ──

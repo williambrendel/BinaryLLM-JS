@@ -23,7 +23,7 @@ import andCount from "../math/sparse/andCount.js";
  * @returns {{G:Array, pMin:number, unionRecall:number, curve:Array, rounds:number, stop:string}}
  */
 export const boost = (A, neg, opts = {}) => {
-  const { rho = 40, maxRounds = 50, solver = "exp", alphaR, epsMin = 1e-10, commonCoef = 1, commonCoefU, commonCoefM, scaffoldOnly = false, coreT = 0, recallTau = false, tauFloor = 0.5, peel = false, peelCoef = 0, maxIter, replEps, suppPatience, shiftConst, shiftDiag, eta, expU, dt, normEdges, normT, domset = false, domShift = 1 } = opts;
+  const { rho = 40, maxRounds = 50, solver = "exp", alphaR, epsMin = 1e-10, commonCoef = 1, commonCoefU, commonCoefM, scaffoldOnly = false, coreT = 0, recallTau = false, tauFloor = 0.5, peel = false, peelCoef = 0, maxIter, replEps, suppPatience, shiftConst, shiftDiag, eta, expU, dt, normEdges, normT, domset = false, domShift = 1, metric, metricScale } = opts;
   const nA = A.length, pMin = nA / (nA + neg.negN);
   let w = new Float64Array(nA).fill(1 / nA);
   const G = [], curve = [], covered = new Array(nA).fill(false);
@@ -33,7 +33,7 @@ export const boost = (A, neg, opts = {}) => {
 
   for (let round = 0; round < maxRounds; round++) {
     let ts = prof && nowMs();
-    const { u, edges } = buildAffinity(A, w, neg, { alphaR, commonSet: neg.DtauSel, commonCoef, commonCoefU, commonCoefM, exclude: peel ? peeled : undefined, excludeCoef: peelCoef, normEdges, normT });
+    const { u, edges } = buildAffinity(A, w, neg, { alphaR, commonSet: neg.DtauSel, commonCoef, commonCoefU, commonCoefM, exclude: peel ? peeled : undefined, excludeCoef: peelCoef, normEdges, normT, metric, metricScale });
     if (prof) { prof.affinity += nowMs() - ts; prof.edges = edges.m.length; ts = nowMs(); }
     // domset: classic pure-M dominant set — drop the unary u and the −ρ spread regularizer, shift M to nonneg
     // (Pelillo α=|min M|≈8), std replicator ⇒ a TINY tight clique (recall often <50%), to be augmented below.

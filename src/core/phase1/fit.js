@@ -41,12 +41,16 @@ export const fitClass = (A, negPool, Mglob, opts = {}) => {
   // small classes over-fire (few positives → noisy val θ, loose parts) → scale the FP penalty λ up as |A|
   // shrinks: λ = clamp(1500/|A|, 1, 3). bank(500)→3, state/time→1. Overridable via opts.fpWeight.
   const autoFp = Math.min(3, Math.max(1, 1500 / A.length));
-  // solver="dc" (matrix-split) is the default: parameter-free, converges to the true optimum, negatives-native,
-  // per-iter cost ≈ exp (M⁺/M⁻ partition the nnz). Parts are solver-invariant so metrics ≈ the exp-CV'd config
-  // (verified within CV noise); a full re-CV to refresh the headline numbers is pending.
+  // solver="exp" (Pelillo exponential replicator) is the default: fastest AT QUALITY with the support-stability
+  // early-stop (exp never fully converges, so suppPatience stops it once the extracted set settles ⇒ ~2.6×).
+  // Parts are solver-invariant (dc/std/hybrid match within CV noise); dc is parameter-free but ~15% slower here
+  // (it runs to full weight-convergence we don't use). hybrid = std-where-π>0-else-exp; tested, no distinct edge.
   // suppPatience=3: support-stability early-stop in the replicator (validated ~2.6× faster, quality-neutral —
   // the support set settles long before the weights fully converge, and we only use the ranking).
-  const { valFrac = 0.25, rho = 80, solver = "dc", delta = 0.05, fpWeight = autoFp, tuneTheta = true, earlyStop = true, recallTau = true, tauFloor = 0.6, suppPatience = 3, maskNodes = new Set(), core = "boost", ...boostOpts } = opts;
+  // metric="rawpmi": M = PMI⁺ − PMI⁻ WITHOUT the max(0,·) flooring — CV-confirmed tied with floored PMI across
+  // 11 words (65.1/9.6 vs 64.2/9.7), a free simplification. (The marginal-normalization inside PMI is load-
+  // bearing — plain rate-difference fails; only the flooring is droppable.)
+  const { valFrac = 0.25, rho = 80, solver = "exp", delta = 0.05, fpWeight = autoFp, tuneTheta = true, earlyStop = true, recallTau = true, tauFloor = 0.6, suppPatience = 3, metric = "rawpmi", maskNodes = new Set(), core = "boost", ...boostOpts } = opts;
   const nTr = Math.max(1, Math.floor(A.length * (1 - valFrac)));
   const tr = A.slice(0, nTr), val = A.slice(nTr);
 
@@ -55,8 +59,8 @@ export const fitClass = (A, negPool, Mglob, opts = {}) => {
   // clears 50%), not the full strong dominant set — the correct weak-classifier input to AdaBoost.
   // core="adaptive" (§8 candidate): FP-aware concentration-driven disjoint cores instead of the AdaBoost loop.
   const { G } = core === "adaptive"
-    ? adaptiveCore(tr, neg, { rho, solver, ...boostOpts })
-    : boost(tr, neg, { rho, solver, recallTau, tauFloor, ...boostOpts });
+    ? adaptiveCore(tr, neg, { rho, solver, metric, suppPatience, ...boostOpts })
+    : boost(tr, neg, { rho, solver, recallTau, tauFloor, metric, suppPatience, ...boostOpts });
 
   // outer early-stop: prefix maximizing val (recall − λ·confFP), λ=fpWeight; ties → shortest prefix.
   // earlyStop=false ⇒ keep the FULL discovered set (no trim).

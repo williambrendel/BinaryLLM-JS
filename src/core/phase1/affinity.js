@@ -40,30 +40,42 @@ export const buildAffinity = (A, w, neg, opts = {}) => {
     for (let i = 0; i < pos.length; i++) for (let j = i + 1; j < pos.length; j++) { const k = pos[i] * pPlus.length + pos[j]; jPos.set(k, (jPos.get(k) || 0) + wi); }
   }
 
-  // unary log-odds
-  const u = new Float64Array(n);
-  for (let p = 0; p < n; p++) { const pp = mPos[p] / (W || 1), pm = (nMinus.get(pPlus[p]) || 0) / (negN || 1); u[p] = Math.log((pp + alphaR) / (pm + alphaR)); }
+  // metric: "pmi" (default) = floored-PMI difference + log-odds unary. "rate" = plain rate difference (p⁺−p⁻),
+  // no logs/flooring. "rawpmi" = PMI difference WITHOUT the max(0,·) flooring. metricScale rescales u & M to keep
+  // the u/M/ρ balance comparable across metrics (simpler metrics live on a different numeric scale).
+  const metric = opts.metric || "pmi", mScale = opts.metricScale ?? 1;
+  const unary = (pp, pm) => (metric === "rate" ? pp - pm : Math.log((pp + alphaR) / (pm + alphaR)));
+  const pairM = (jw, mi, mj, jn, ni, nj) => {                             // symmetric pair affinity per metric
+    if (metric === "rate") return jw / W - jn / negN;
+    // codds: co-occurrence LOG-ODDS log(p⁺(a,b)/p⁻(a,b)) — the pairwise analog of the unary log-odds u.
+    // SAME metric as u (one unary, one pairwise), no marginal normalization, no flooring. The ratio (vs neg
+    // co-occurrence) still cancels common bits, unlike the raw rate-difference.
+    if (metric === "codds") return Math.log((jw / W + alphaR) / (jn / negN + alphaR));
+    const pp = jw > 0 ? Math.log((jw / W) / ((mi / W) * (mj / W))) : 0;
+    const pn = jn > 0 ? Math.log((jn / negN) / ((ni / negN) * (nj / negN))) : 0;
+    return metric === "rawpmi" ? pp - pn : (pp > 0 ? pp : 0) - (pn > 0 ? pn : 0);
+  };
 
-  // pairwise PMI difference. Candidate pairs = observed in positives OR negatives.
-  const pmiPos = (jw, pi, pj) => { const v = Math.log((jw / W) / ((mPos[pi] / W) * (mPos[pj] / W))); return v > 0 ? v : 0; };
+  // unary
+  const u = new Float64Array(n);
+  for (let p = 0; p < n; p++) { const pp = mPos[p] / (W || 1), pm = (nMinus.get(pPlus[p]) || 0) / (negN || 1); u[p] = unary(pp, pm) * mScale; }
+
+  // pairwise affinity. Candidate pairs = observed in positives OR negatives.
   const seen = new Set(), Iarr = [], Jarr = [], Marr = [];
-  const emit = (pi, pj, mval) => { if (mval !== 0) { Iarr.push(pi); Jarr.push(pj); Marr.push(mval); } };
+  const emit = (pi, pj, mval) => { if (mval !== 0) { Iarr.push(pi); Jarr.push(pj); Marr.push(mval * mScale); } };
   // positive-observed pairs
   for (const [k, jw] of jPos) {
     const pi = Math.floor(k / pPlus.length), pj = k % pPlus.length; seen.add(k);
-    const pp = pmiPos(jw, pi, pj);
     const nk = pairKey(pPlus[pi], pPlus[pj]); const jn = jMinus.get(nk) || 0;
-    let pn = 0; if (jn > 0) { const v = Math.log((jn / negN) / (((nMinus.get(pPlus[pi]) || 0) / negN) * ((nMinus.get(pPlus[pj]) || 0) / negN))); pn = v > 0 ? v : 0; }
-    emit(pi, pj, pp - pn);
+    emit(pi, pj, pairM(jw, mPos[pi], mPos[pj], jn, nMinus.get(pPlus[pi]) || 0, nMinus.get(pPlus[pj]) || 0));
   }
-  // negative-only pairs (both bits in P⁺, not co-observed in positives) → repulsive −PMI⁻
+  // negative-only pairs (both bits in P⁺, not co-observed in positives) → repulsive
   for (const [nk, jn] of jMinus) {
     const a = Math.floor(nk / PAIRK), b = nk % PAIRK;
     const pi = idx.get(a), pj = idx.get(b); if (pi === undefined || pj === undefined) continue;
     const key = pi < pj ? pi * pPlus.length + pj : pj * pPlus.length + pi;
     if (seen.has(key)) continue;
-    const v = Math.log((jn / negN) / (((nMinus.get(a) || 0) / negN) * ((nMinus.get(b) || 0) / negN)));
-    const pn = v > 0 ? v : 0; emit(Math.min(pi, pj), Math.max(pi, pj), -pn);
+    emit(Math.min(pi, pj), Math.max(pi, pj), pairM(0, mPos[pi], mPos[pj], jn, nMinus.get(a) || 0, nMinus.get(b) || 0));
   }
 
   // §1.3 — soft precondition (instead of hard ban): scale common bits' u and incident M toward 0 by
