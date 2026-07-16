@@ -1,18 +1,16 @@
 # Phase-1 — Weak-Classifier Part Discovery via Inhomogeneous StQP + AdaBoost
 
 **Status legend used throughout.** Every non-foundational claim is tagged:
-`[DEPLOYED+CV]` shipped in `fitClass` and validated by 5-fold CV · `[CANDIDATE]` the adaptive-core
-algorithm (§8), implemented as a benchmark mode and validated on a single structural split — **not yet CV'd
-or wired into `fitClass`** · `[MEASURED]` a mechanistic finding from one or more runs · `[OPEN]` untested
-lead. Do not read a `[CANDIDATE]`/`[MEASURED]` result as production-validated.
+`[DEPLOYED+CV]` shipped in `fitClass` and validated by CV · `[MEASURED]` a mechanistic finding from one or
+more runs · `[RETROSPECTIVE]` an approach that was implemented, evaluated, and **removed** (kept as a design
+record) · `[OPEN]` untested lead. Do not read a `[MEASURED]` result as production-validated.
 
 Implementation spec for the JS trainer (`src/core/phase1/*`, driver `benchmark/phase1/phase1.js`). Breaks the blunt
 positive union `p⁺` into weak parts using Pelillo replicator dynamics on a signed bit-affinity graph with
 unary potentials, then boosts them by **AdaBoost sample reweighting** (never peeling the positive set). No
-C++, no RNN. Dynamics, the `−ρI` regularizer, and the positivity shift follow **Pavan & Pelillo, "Dominant
-Sets and Hierarchical Clustering," ICCV 2003**. The `ρ > s₀−1` size heuristic (§8) is *motivated* by their
-bounds but does **not** transfer verbatim to our signed `M` — a starting point confirmed empirically, not a
-cited guarantee.
+C++, no RNN. The dynamics and the `−ρI` regularizer follow **Pavan & Pelillo, "Dominant Sets and Hierarchical
+Clustering," ICCV 2003**. The `ρ` size heuristic (§3) is *motivated* by their bounds but does **not** transfer
+verbatim to our signed `M` — a starting point confirmed empirically, not a cited guarantee.
 
 Signatures are the **3F canon** `[L | L1∪L2 | C]` (three positional bands, `benchmark/phase1/phase1.js` `feat()`):
 band **F2** = adjacent word (dd=1), **F1** = near (dd 2–3), **F0** = far (dd ≥ 4); each band spans the full
@@ -43,18 +41,17 @@ sub-parts per class*. The reality is more nuanced and is the through-line of the
    §5.3) — instead of the full strong dominant set — gives flat, substantive α votes and genuinely more
    diverse parts (intra-Jaccard 0.80 → 0.28–0.43), while recovering held-out recall (§7). This is the
    shipped `fitClass` default.
-3. **`[CANDIDATE]` The efficient, structured realization the investigation converged to: the adaptive-core
-   algorithm (§8).** Extract dominant → weight-first tight core at equal recall → if strong-and-clean ship a
-   single core, else accumulate **disjoint** weak cores via explicit **bit-peeling** until coverage suffices.
-   Every knob is data-driven (tightness by recall, count by peel-to-target, single-vs-ensemble by recall
-   **and** a concentration-derived FP threshold). It resolves the "no overlap, each core meaningful, small
-   union" goals — but is validated only on a single structural split; CV productionization is the open next
-   step.
+3. **`[RETROSPECTIVE]` An efficient structured alternative — the adaptive-core algorithm (§8) — was explored
+   and rejected.** It extracted disjoint weak cores via explicit bit-peeling with a concentration-derived FP
+   threshold. On 11-word CV it did **not** beat the deployed θ-tuned head (same recall/FP frontier, lower
+   operating point) — FP control is delivered by the head, not by structural core-spawning — so the code was
+   removed. The deployed recall-based weak extraction (point 2) is the shipped design.
 
-So the class is best described as **one dominant bundle that is efficiently representable as a single
-min-covered core, or (for genuinely diffuse/high-FP words) a small set of disjoint weak cores.** The
-"orthogonal sub-parts" framing is not supported *from sample-reweighting alone*; disjoint structure requires
-explicit bit-peeling, and how many disjoint cores exist is **word-specific (1–6), a semantic property** (§8, §11).
+So the class is best described as **one dominant bundle**, extracted as a few overlapping recall-based weak
+parts and combined by the θ-tuned α-sum head. The "orthogonal sub-parts" framing is not supported *from
+sample-reweighting alone*; disjoint structure requires explicit bit-peeling, and how many disjoint cores
+exist is **word-specific (1–6), a semantic property** (§8.4) — but partitioning that way does not improve the
+operating point (§8).
 
 **Two deferrals (not omissions):** `p⁻` (the negative channel — other classes' `{p⁺}`) is **phase 2**;
 sense isolation is a **later layer** (phase-1 parts deliberately bundle senses).
@@ -66,7 +63,7 @@ sense isolation is a **later layer** (phase-1 parts deliberately bundle senses).
 3. **Strong bits** — unary log-odds `u` (§1.1).
 4. **Two co-occurrence structures** — folded into the PMI-difference `M` (§1.2).
 5. Extract parts (§5), accept on recall/precision bounds, reweight, repeat (§7). Deployed extraction is
-   recall-based weak (§5.3); the adaptive-core algorithm (§8) is the candidate successor.
+   recall-based weak (§5.3).
 
 ---
 
@@ -95,19 +92,26 @@ No `C⁺`/`C⁻` state, no residual `R`. `M` is the affinity directly; positives
 the unary channel, no rule. `α_r` (default `1/|Neg|`) only bounds empty cells. The `−log p⁻` term is a
 targeted IDF (down-weights confusable-common bits).
 
-### 1.2 Pairwise potential — PMI difference (each side floored ≥ 0)
-`M_ab = max(0, PMI⁺(a,b)) − max(0, PMI⁻(a,b))`, where `PMI⁺` uses `w`-weighted joints/marginals over `A`
+### 1.2 Pairwise potential — PMI difference
+`M_ab = PMI⁺(a,b) − PMI⁻(a,b)`, where `PMI⁺` uses `w`-weighted joints/marginals over `A`
 (rebuilt each round) and `PMI⁻` is frozen. `M>0` net-attract, `<0` net-repel, `0` no edge. **Marginals
-lifted out first**, then sets compared: two common bits that merely co-occur net ≈ 0; a pair bound in
-τ-contexts but incidental in confusables nets strongly positive.
+lifted out first** (the marginal normalization inside PMI is load-bearing — it cancels common bits; a plain
+rate-difference fails, `[MEASURED]`), then sets compared: two common bits that merely co-occur net ≈ 0; a
+pair bound in τ-contexts but incidental in confusables nets strongly positive.
+
+> **Note `[DEPLOYED+CV]`:** an earlier form floored each side at zero — `max(0,PMI⁺) − max(0,PMI⁻)`. The
+> flooring was CV-tied with the unfloored difference across 11 words (65.1/9.6 vs 64.2/9.7 held recall/FP) and
+> **dropped** as unearned complexity. A consistent co-occurrence log-odds `log(p⁺(a,b)/p⁻(a,b))` was also
+> tested — same frontier, not adopted. See `docs/phase1_report.md`.
 
 **Common-bit self-cancellation `[MEASURED]`.** For a *universal* common bit,
 `PMI⁺(a,b) ≈ PMI⁻(a,b) ≈ log(1/f_a)` (the marginal divides out), so `M_ab ≈ 0` for every neighbour — **both
 sides cancel.** With `u ≈ 0` and `−ρx`, the payoff `π ≈ −ρx < 0` drives it to zero: the replicator
 self-eliminates universal common bits **without any ban** (empirically confirmed: unmasked-node discovery
-reached state 99.2%). The channel-decoupling test (`commonCoefU`/`commonCoefM`) confirms recall lives in the
-**unary** channel — killing common bits' edges is bit-identical to banning them (state/time), while killing
-their unary reproduces the ban — but the edges still *scaffold precision* under early-stop, so keep both.
+reached state 99.2%). A channel-decoupling test (per-channel common-bit coefficients, since removed) confirmed
+recall lives in the **unary** channel — killing common bits' edges was bit-identical to banning them
+(state/time), while killing their unary reproduced the ban — but the edges still *scaffold precision* under
+early-stop, so both channels are kept and the coefficient knob was dropped.
 
 `u` and `M` are commensurable (log units); weights fixed `a⁺=a⁻=1` (and `|Neg|=|A|`).
 
@@ -184,25 +188,33 @@ avoid the AdaBoost vote `α_k`). On the simplex `−ρ‖b‖²` is concave ⇒ 
 small clusters vanish. `f` is maximized on `Δ` (§5), not unconstrained (that returns all of `P⁺`).
 
 ## 4. Replicator payoff — direct inhomogeneous gradient
-`π(x) = u + Mx − ρx` (the linear `u` enters the payoff directly — no homogenization, no dense `Q`). Standard
-multiplicative update needs `π > 0`: add a **scalar** shift `π + s·1` (`s = −min π + ε_s`, constant on `Δ`).
-Exponential update needs no shift. `M` is a sparse edge map; `Mx` is one sparse matvec.
+`π(x) = u + Mx − ρx` (the linear `u` enters the payoff directly — no homogenization, no dense `Q`). `M` is a
+sparse edge map; `Mx` is one sparse matvec (`for (a,b,m) in edges: y[a]+=m·x[b]; y[b]+=m·x[a]`).
 
 ## 5. Replicator dynamics + support extraction
 
 ### 5.1 Solvers `[DEPLOYED]`
-Three solvers on the same payoff: `std` (scalar positivity shift), `exp` (sign-robust, no shift), `hybrid`
-(std where `min π > 0`, else exp). **Shipped: `exp`** — equal support (Jaccard 1.000, same `f`), 208 matvecs
-vs 500 for std/hybrid (D2). `Mx` = `for (a,b,m) in edges: y[a]+=m·x[b]; y[b]+=m·x[a]`; active-set shrink as
-`x` concentrates.
+Two solvers on the same payoff, **both parts-equivalent** (identical support within CV noise):
+- **`exp` (default)** — Pelillo exponential update `x_i ← x_i·exp(π_i)/Σ`; sign-robust, no shift needed.
+- **`dc`** — matrix-split `x_i ← x_i·(M⁺x+u⁺+β)/((M⁻x+u⁻+ρx)+⟨x,π⟩+β)`; parameter-free, positivity-safe by
+  construction (M⁺/M⁻ partition M's edges, so it costs the same total matvec work as `exp`), and it converges
+  to the true optimum. Available as `solver:"dc"`.
+
+`exp` is the shipped default (fastest with the early-stop below). Earlier std/hybrid/continuous/InImDyn
+solvers were all measured parts-equivalent and removed in cleanup (§14).
+
+### 5.1a Support-stability early-stop `[DEPLOYED]`
+The extractor's output is `support(x*)` + its weight-ordering, **not** the fully-converged `x`. `exp` does not
+reach a tight L1 fixed point on the flat, distributed-clique landscape, so `suppPatience` (default 3) stops
+the iteration once the support SET has been unchanged for K iters — **≈2.6× fewer iters, quality-neutral**
+(we only consume the ranking). `dc` converges on its own, so the early-stop is a no-op there.
 
 ### 5.2 x\* shape — a descending slope, NOT a cliff `[MEASURED]`
 The equilibrium `x*` is a **descending slope**: the top ~20–30 bits carry 10–16× uniform weight, then a long
 low-weight tail (median 0.5× uniform) to ~0. There is **no natural cliff**; `tauSupp` cuts arbitrarily into
-the tail, so the full-support `|Q|` (~200 bits) is **soft**. **Correction:** the previously-logged
-`cliffGap = 1.0` was an **artifact** of the active-set prune (excluded bits are hard-zeroed, so the boundary
-gap is always 1.0) — it did not measure the natural shape. Consequence: the "tight core" and the "tail" are
-two ends of one slope (§5.4).
+the tail, so the full-support `|Q|` (~200 bits) is **soft**. (A `cliffGap` diagnostic once logged here read a
+constant 1.0 — an **artifact** of the active-set prune hard-zeroing excluded bits, not the natural shape; it
+was removed.) Consequence: the "tight core" and the "tail" are two ends of one slope.
 
 ### 5.3 Support extraction — recall-based weak (deployed) vs generic (retired) `[DEPLOYED+CV]`
 - **Generic `tauSupp`** = take the full dominant set (~200-bit support). This is a **strong** classifier
@@ -314,11 +326,17 @@ train/held gap and the FP floor persist (§11).
 
 ---
 
-## 8. `[CANDIDATE]` The adaptive-core algorithm — efficient, disjoint, data-driven
+## 8. `[RETROSPECTIVE]` The adaptive-core algorithm — explored, CV-rejected, REMOVED
 
-This is the design the efficiency arc converged to. **Implemented as `ADAPTCORE=1` in the driver and
-validated on a single structural split; not yet CV'd or wired into `fitClass`.** It supersedes §7's
-multi-DS ensemble *if* CV confirms out-of-sample generalization.
+> **Status: not in the code.** The adaptive-core (FP-aware concentration-driven disjoint cores) was
+> implemented, then CV'd against the deployed θ-tuned head across 11 words — and it **did not beat it**: same
+> recall/FP efficiency, just a lower-recall operating point (it collapses to K=1 for most words). The FP
+> control it was designed to provide is **already delivered by the head's θ-tuning**, more cheaply. The
+> module (`adaptiveCore.js`) and its `ADAPTCORE` driver were **removed**; the prototype is recoverable from
+> git `1d565bc`. The subsections below are kept as the design record of what was explored. Key surviving
+> facts: the number of distinct disjoint cores is **word-specific (1–6), a semantic property** (§8.4), and at
+> vocabulary scale the representation **must discriminate combinatorially** (§8.6) — those are measurements,
+> independent of the removed code.
 
 ### 8.1 The algorithm
 ```
@@ -366,7 +384,7 @@ each round (peeled bits excluded from the graph; uncovered positives up-weighted
     neither constant is **compare-both**: build the ensemble and ship whichever (single vs ensemble) has lower
     FP — it *measures* the ensemble FP (so it sees the saturation directly) instead of predicting it.
 
-### 8.3 Canon result (single split, STRONG=0.7, VIABLE=0.55, TR=0.85, dynamic FPMAX) `[CANDIDATE]`
+### 8.3 Canon result (single split — the removed candidate) `[RETROSPECTIVE]`
 - **Single strong core:** time (81/12), state (72/10), world (83/18).
 - **Disjoint ensemble (overlap 0.00, union escapes the dominant core):** century (2 cores, **28 bits,
   93%, 4% FP**), music (K=3, 92%, 18%), river (K=2, 87%, 18%), government (K=3, 94%, 25%), bank (K=3, 92%,
@@ -419,12 +437,9 @@ gate is for. Argues for tight cores.
 | `λ` / `fpWeight` | val θ-tune FP weight (§7.2) | **adaptive `clamp(1500/\|A\|,1,3)`** |
 | `θ` | ensemble threshold | **val-tuned** at `λ` |
 | `valFrac` | train/val split (§7.3) | **0.25** |
-| solver | std/exp/hybrid (§5.1) | **exp** (D2) |
-| `p_min` | precision floor (§8) | `\|A\|/(\|A\|+\|Neg\|)` = **0.5** |
-| **`[CANDIDATE]` §8:** `STRONG` / `VIABLE` / `TR` | strong recall / weak recall floor / union target | 0.7 / 0.55 / 0.85 |
-| **`[CANDIDATE]`** `FPCAP` / `FPSLOPE` | dynamic FPMAX = `min(FPCAP, FPSLOPE·r50)` — `FPCAP` = ensemble-FP **plateau** (essential, models saturation; do **not** uncap — reverts high-FP words to high-FP singles, §8.2); `FPSLOPE` = concentrated-regime rise. Both canon-fit, CV-pending | 0.25 / 0.015 |
-| **`[CANDIDATE]`** `peel` / `peelCoef` | hard bit-peel between cores (§8.2) | on / 0 (hard) |
-| `coreT`, `commonCoefU/M`, `scaffoldOnly` | diagnostic knobs (channel/tight ablations) | off |
+| `solver` | replicator update (§5.1) | **`exp`** (default) or `dc` — parts-equivalent |
+| `suppPatience` | support-stability early-stop (§5.1a) | **3** (≈2.6× faster, quality-neutral) |
+| `p_min` | precision floor | `\|A\|/(\|A\|+\|Neg\|)` = **0.5** |
 
 ### 9.1 Decisions checklist — status
 | # | decision | resolved value | evidence |
@@ -437,7 +452,7 @@ gate is for. Argues for tight cores.
 | D6 | part diversity | **one bundle → efficient single/few disjoint cores** | generic: one bundle (bank ~94% redundant); recallTau@0.6: Jaccard 0.43/0.34/0.28; disjoint requires hard peel; count 1–6 word-specific `[MEASURED]` |
 | D7 | extraction | **recall-based weak, tauFloor 0.6** | generic = strong single detector; recallTau@0.6 = flat α, diverse, recall recovered `[DEPLOYED+CV]` |
 | D8 | head operating point | **val θ-tune, adaptive λ** | λ=1 strict win over ½Σα; adaptive λ fixes small-class FP `[DEPLOYED+CV]` |
-| D9 | efficient extraction (candidate) | **adaptive-core (§8): weight-first tight core, strong/weak on recall+dynFP, hard-peel disjoint** | single-split canon: FP 4–25%, disjoint, escapes dominant — **CV pending** `[CANDIDATE]` |
+| D9 | efficient extraction (adaptive-core) | **explored, CV-REJECTED, removed** | did not beat the θ-tuned head on 11-word CV (same frontier, lower operating point); FP control lives in the head, not structural spawning (§8) `[RETROSPECTIVE]` |
 
 ---
 
@@ -448,10 +463,11 @@ replicator `O(nnz(M)+n)` per step (one sparse matvec, active-set-shrunk). `Neg`,
 Total `O(T·|A|·density²)`, `T ≈ tens`, density 1–3%.
 
 ## 11. Evaluation hooks + established findings
-Driver modes (`benchmark/phase1/phase1.js`): `CV` (5-fold ban/keep/keep+es), `E2E` (deployed stats), `DIST`
-(α/|Q| shape), `OVERLAP` (signature intra/cross per band), `XCLASS` (cross-class part overlap), `BANDMASK`,
-`BANDS`, `COREWASTE`, `COREDECOMP`, `TAIL`, `TIGHTCORE`, `TIGHTBOOST`, `DISJTIGHT`, `COREPART`, `NEFF`,
-`COMPARE50`, `ADAPTCORE`, `TFCV`/`FPCV`/`TRIMCV`/`CORECV`/`RTCV`, `SOFTPEEL`, `XSTAR`.
+`benchmark/phase1/phase1.js` runs the deployed config under 4-fold cross-word CV (held-out recall / confFP
+per word). The many one-off study modes from the investigation (solver/shift/metric sweeps, core-decomp,
+band/overlap probes, etc.) were **removed in cleanup**; their scripts are archived in git and their captured
+numbers live in `benchmark/RESULTS.md` and `docs/phase1_report.md`. Unit tests for every core module are in
+`__tests__/core/phase1/`.
 
 **Class separability (`OVERLAP`) `[MEASURED]`:** signature overlap is low/sparse; discrimination lives in
 the **near band F1 (dd 2–3)** (intra bank 6.2/time 5.3 ≫ cross 3.1); **F2-adjacent doesn't separate** (intra
@@ -499,19 +515,18 @@ further where the class decomposes.
   val early-stop → adaptive-λ val θ-tune. Opts `recallTau/tauFloor/maskNodes/fpWeight/valFrac/...`.
 - `phase1/negSet.js` — `Neg` via mild-masked single sorted pass + δ-band; decoupled `maskSelect`/`maskNodes`;
   frozen `p⁻`,`P⁻`. Two-pass path retained (off) as closed evidence.
-- `phase1/affinity.js` — `w`-weighted `u`, `M` (PMI-diff sparse edge map), rebuilt per round; per-channel
-  `commonCoefU/M`; `exclude`/`excludeCoef` for hard/soft peel.
-- `phase1/replicator.js` — direct payoff `π=u+Mx−ρx`; std/exp/hybrid; support + `cliffGap` (artifact, §5.2).
+- `phase1/affinity.js` — `w`-weighted `u` (log-odds), `M` (PMI-difference sparse edge map), rebuilt per round.
+- `phase1/replicator.js` — direct payoff `π=u+Mx−ρx`; solvers `exp`/`dc`; support-stability early-stop
+  (`suppPatience`); support extraction.
 - `phase1/mfit.js` — m-of-n fit, base-rate-correct precision at recall floor 0.5.
-- `phase1/boost.js` — reweight loop; dual-bound; ε-clip; opts `recallTau/tauFloor/peel/peelCoef/coreT/
-  commonCoef*/scaffoldOnly`.
+- `phase1/boost.js` — reweight loop; dual-bound; ε-clip; opts `recallTau/tauFloor/suppPatience/solver`.
 - `phase1/head.js` — α-sum head `S_τ=Σα_k h_k > θ`; max-pool readout for A/B.
-- `benchmark/phase1/phase1.js` — the driver and all evaluation modes (§11); the `[CANDIDATE]` adaptive-core lives
-  here as `ADAPTCORE=1`.
-- `__tests__/core/phase1/fit.test.js` — 4 tests, green. `data/phase1_targets.txt` — the canon.
+- `benchmark/phase1/phase1.js` — deployed-config 4-fold cross-word CV driver (§11).
+- `__tests__/core/phase1/*.test.js` — unit tests for all six modules + the `fitClass` integration test (green).
+  `data/phase1_targets.txt` — the canon.
 - Report: `docs/phase1_report.md` (measured tables, reproducible via the driver flags).
 
 ## 14. Run metadata
 Corpus wiki_4m, dict english.txt (`F=33,304`, `3F=99,912`), targets = the canon (`data/phase1_targets.txt`),
 `|A|` 85–4978. Deployed config: `recallTau tauFloor=0.6, maskNodes=∅ keep, val early-stop, val θ-tune,
-adaptive λ, ρ=80, exp solver, DD_sel=0.05, δ=0.05`. Adaptive-core (§8) is the CV-pending candidate successor.
+adaptive λ, ρ=80, exp solver, DD_sel=0.05, δ=0.05`. 

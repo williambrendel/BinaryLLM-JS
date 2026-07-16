@@ -16,8 +16,8 @@ folds; per fold, internal train/val split for early-stop + θ, test = held fold)
 | module | § | role |
 |---|---|---|
 | `negSet.js` | §2 | confusable `Neg` (single-pass masked content-fraction + δ band); decoupled SELECT vs NODE mask; frozen `n⁻`, `j⁻` |
-| `affinity.js` | §1.1–1.2 | `w`-weighted `u` (log-odds) + `M` (PMI-diff sparse edge map), rebuilt/round; per-channel common-bit coeffs `commonCoefU`/`commonCoefM` |
-| `replicator.js` | §4–§5 | direct payoff `π = u + Mx − ρx`; std / exp / hybrid; active-set; support extraction |
+| `affinity.js` | §1.1–1.2 | `w`-weighted `u` (log-odds) + `M` (PMI-difference sparse edge map), rebuilt/round |
+| `replicator.js` | §4–§5 | direct payoff `π = u + Mx − ρx`; solvers `exp`/`dc`; support-stability early-stop; support extraction |
 | `mfit.js` | §6 | m-of-n fit, base-rate-correct precision at weighted-recall floor 0.5 |
 | `boost.js` | §7 | AdaBoost reweight loop (train-pure), dual-bound stop, `α_k=½log(rec/(1−rec))`, ε-clip |
 | `head.js` | §7.2 | α-weighted sum `S_τ=Σα_k h_k > θ`; max-pool readout for the §11 A/B |
