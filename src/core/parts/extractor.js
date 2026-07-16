@@ -10,7 +10,7 @@
  * produces the trained dictionary in two phases:
  *
  * 1. **Seed** — whole atoms (length-bound + frequency cascade prune), single-char
- *    letter/digit/connector singletons plus positional Letter atoms, and observed
+ *    letter/digit/connector singletons plus length-1 Start/Mid/End atoms, and observed
  *    delimiters (frequency-sorted) plus connector delimiters.
  * 2. **Peel loop** — re-decompose every training word with the current dictionary,
  *    pool the length-≥2 singleton runs, and for each `L` in `{7..2}` promote the
@@ -27,13 +27,13 @@
  */
 
 import { Kind, kMinPartLength, kMaxPartLength, kInvalidPartId } from "./kind.js";
-import { PartDictionary } from "./dictionary.js";
+import { PartDictionary, DELIMITERS } from "./dictionary.js";
 import { findSingletonRuns } from "./decomposer.js";
 import { adaptivePruneCount } from "../math/adaptiveThreshold.js";
 
 // In-word connectors — must stay in sync with tokenize.js's rules. Seeded as
-// single-char Whole atoms, positional Letter atoms, and Delimiter atoms.
-const CONNECTORS = ["-", "'", "&", ",", ".", "$"];
+// single-char Whole atoms, length-1 Start/Mid/End atoms, and Delimiter atoms.
+const CONNECTORS = ["-", ",", ".", "$"];
 
 /**
  * @typedef {Object} ExtractorConfig
@@ -103,19 +103,19 @@ const addTopK = (dict, kind, sorted, k) => {
 
 /**
  * @function addLetterPositions
- * @description Seeds the three positional Letter atoms for a single character:
- * start (`s##`), middle (`##s##`), and end (`##s`). The `##` markers encode
- * word-boundary position, mirroring how positional atoms are matched during
- * decomposition.
+ * @description Seeds the three length-1 fragment atoms for a single character:
+ * {@link Kind.Start} (`s`), {@link Kind.Mid} (`s`), and {@link Kind.End} (`s`).
+ * The value is the bare character — word-boundary position is carried by the
+ * kind, mirroring how fragments are matched during decomposition.
  *
  * @param {PartDictionary} dict - The dictionary being populated.
  * @param {string} s - The single-character byte-string to add positional atoms for.
  * @returns {void}
  */
 const addLetterPositions = (dict, s) => {
-  dict.add(Kind.Letter, s + "##");
-  dict.add(Kind.Letter, "##" + s + "##");
-  dict.add(Kind.Letter, "##" + s);
+  dict.add(Kind.Start, s);
+  dict.add(Kind.Mid, s);
+  dict.add(Kind.End, s);
 };
 
 /**
@@ -347,7 +347,7 @@ export class PartExtractor {
    *
    * Phases:
    * 1. **Seed** — length-bounded, cascade-pruned Whole atoms; single-char Whole
-   *    atoms and positional Letter atoms for `a`–`z`, `0`–`9`, and the in-word
+   *    atoms and length-1 Start/Mid/End atoms for `a`–`z`, `0`–`9`, and the in-word
    *    connectors (when `addLetterSingletons` is enabled); observed Delimiter
    *    atoms in frequency order plus the connector delimiters.
    * 2. **Peel** — up to `maxPeelIterations` passes that re-decompose every
@@ -390,7 +390,7 @@ export class PartExtractor {
       for (let i = 0; i < lim; i++) dict.add(Kind.Whole, wholes[i][0]);
     }
 
-    // --- Seed: single-char Whole atoms + positional Letter atoms ---
+    // --- Seed: single-char Whole atoms + length-1 Start/Mid/End atoms ---
     if (cfg.addLetterSingletons) {
       for (let c = 97; c <= 122; c++) dict.add(Kind.Whole, String.fromCharCode(c));
       for (let c = 48; c <= 57; c++) dict.add(Kind.Whole, String.fromCharCode(c));
@@ -401,9 +401,8 @@ export class PartExtractor {
       for (const c of CONNECTORS) addLetterPositions(dict, c);
     }
 
-    // --- Seed: observed delimiters (freq order) + connector delimiters ---
-    for (const [v] of sortByFreqDesc(this._delimFreq)) dict.add(Kind.Delimiter, v);
-    for (const c of CONNECTORS) dict.add(Kind.Delimiter, c);
+    // --- Seed: fixed manual delimiter set (not learned from the corpus) ---
+    for (const d of DELIMITERS) dict.add(Kind.Delimiter, d);
 
     // --- Peel loop ---
     for (let iter = 0; iter < cfg.maxPeelIterations; iter++) {

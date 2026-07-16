@@ -115,7 +115,6 @@ const main = () => {
   process.stderr.write(`  start:  ${dict.countOfKind(Kind.Start)}\n`);
   process.stderr.write(`  mid:    ${dict.countOfKind(Kind.Mid)}\n`);
   process.stderr.write(`  end:    ${dict.countOfKind(Kind.End)}\n`);
-  process.stderr.write(`  letter: ${dict.countOfKind(Kind.Letter)}\n`);
   process.stderr.write(`  delim:  ${dict.countOfKind(Kind.Delimiter)}\n`);
 };
 

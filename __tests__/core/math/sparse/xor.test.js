@@ -39,6 +39,13 @@ describe("sparse/xor", () => {
     expect(arr(out)).toEqual([1, 2]);
   });
 
+  test("handles a 0 element (0 is a valid part id) — regression", () => {
+    expect(arr(xor([0, 1, 2], [0, 2, 3]))).toEqual([1, 3]);
+    expect(arr(xor([0, 5], [3, 7]))).toEqual([0, 3, 5, 7]);
+    expect(arr(xor([0], [0]))).toEqual([]);
+    expect(arr(xor([0, 2, 4], [0, 1, 4]))).toEqual([1, 2]);
+  });
+
   test("default export equals the named export", () => {
     expect(xor).toBe(xorNamed);
   });

@@ -1,0 +1,22 @@
+# Phase-1 canonical target words (benchmark/phase1.js TARGET=...).
+# Spans the frequency spectrum so per-word findings can be checked for scale.
+# Column: word  (|A| on wiki_4m, 5-fold — approximate, for reference)
+
+# common (|A| ~2000-5000)
+time         # 4978
+world        # 3044
+state        # 2600
+music        # 2114
+
+# medium (|A| ~1500-1800)
+century      # 1778
+river        # 1625
+government   # 1504
+
+# small (|A| ~500)
+bank         # 500
+
+# rare (|A| < 150)
+physics      # 123
+philosophy   # 90
+hydrogen     # 85

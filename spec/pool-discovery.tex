@@ -1,0 +1,730 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage[expansion=false]{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+
+\titleformat{\section}{\normalfont\Large\bfseries}{\thesection.}{0.6em}{}
+\titleformat{\subsection}{\normalfont\large\bfseries}{\thesubsection}{0.6em}{}
+
+\definecolor{codebg}{gray}{0.96}
+\definecolor{codekw}{rgb}{0.10,0.10,0.55}
+\definecolor{codecm}{rgb}{0.30,0.45,0.30}
+\definecolor{openbg}{rgb}{1.0,0.97,0.88}
+\definecolor{openrule}{rgb}{0.75,0.55,0.10}
+
+\lstdefinestyle{algo}{
+  basicstyle=\ttfamily\small, backgroundcolor=\color{codebg},
+  keywordstyle=\color{codekw}\bfseries, commentstyle=\color{codecm}\itshape,
+  columns=fullflexible, keepspaces=true, breaklines=true,
+  frame=single, framesep=5pt, xleftmargin=6pt,
+  literate={<-}{{$\leftarrow$}}1 {>=}{{$\geq$}}1 {<=}{{$\leq$}}1
+           {>}{{$>$}}1 {∅}{{$\emptyset$}}1 {∪}{{$\cup$}}1 {∩}{{$\cap$}}1 {Δ}{{$\Delta$}}1
+           {Σ}{{$\Sigma$}}1 {≥}{{$\geq$}}1 {≤}{{$\leq$}}1 {κ}{{$\kappa$}}1
+           {ρ}{{$\rho$}}1 {α}{{$\alpha$}}1 {β}{{$\beta$}}1 {ε}{{$\varepsilon$}}1 {→}{{$\to$}}1
+           {·}{{$\cdot$}}1 {≈}{{$\approx$}}1 {∈}{{$\in$}}1,
+  morekeywords={for,each,if,else,return,repeat,break,while,in,not,and,or,of,over}
+}
+\lstset{style=algo}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\cont}{\code{cont}}
+\newcommand{\gfn}{\code{gain\_fn}}
+\newcommand{\refine}{\code{REFINE\_PART}}
+\newcommand{\score}{\code{SCORE\_PART}}
+\newcommand{\grow}{\code{GROW\_PART}}
+\newcommand{\openbox}[2]{\par\medskip\noindent\colorbox{openbg}{\parbox{\dimexpr\linewidth-2\fboxsep}{\color{openrule}\textbf{OPEN --- #1}\ \color{black}#2}}\par\medskip}
+
+\title{\textbf{BinaryLLM --- Pool Discovery with Synthetic Part Refinement}\\[4pt]
+\large Complete self-contained specification (premise check, pool, refinement, conditional tree)}
+\author{}\date{}
+\begin{document}\maketitle
+
+\noindent\textbf{Self-contained.} This document specifies everything needed to (i) run the premise check that gates the whole design, and (ii) build the pool-discovery predictor if the check passes. All shared machinery --- signature, containment \cont, the gain, \score/\grow, the leaf readout and calibration gate, the metric schemas --- is defined \emph{here}; there are no references to any other document. \textbf{Toolchain:} C++20, \code{/Users/williambrendel/Development/Projects/BinaryLLM}, CMake/Ninja, doctest; patch \code{CMakeLists.txt} on any file add/remove.
+
+\noindent\textbf{Status --- read first.} This design replaces greedy per-node part growth with an argmax over a pre-computed, non-overfit part pool, plus a refinement step with selectable moves chosen \emph{empirically}. It rests on an unconfirmed premise --- that the earlier single tree failed from \emph{overfitting}, not a signal-poor representation --- which \textbf{must be confirmed by the premise check (\S5) before \S6--\S9 are built.}
+
+\tableofcontents
+\bigskip
+
+\section{Introduction}
+
+\subsection{One-line summary}
+Build a decision tree by \emph{global splits}: at each iteration pick the one part+threshold $(p,t_p)$ that maximizes the size-weighted label-entropy reduction \emph{summed across all current sets}, and apply it to every set at once. A signature's code is its \emph{leaf-path} (which side of each split it took); its prediction is produced by the path decoder (\S4.1): support-weighted log-odds over the per-branch histograms along the root-to-leaf path, interpolation-floored at the unigram. Two single-label versions --- BERT $[L\,|\,R]\to C$ and GPT $[L\cup C]\to\text{next}$ --- share one search. No fixed budget, no reconstruction, no joint branch. Conditionality lives in the tree: later splits are evaluated \emph{within} the partition earlier splits produced, which is what lets it find conditionally-sharp splits a flat top-$K$ selection structurally could not.
+
+
+\subsection{The problem, and why prediction (not reconstruction)}
+The earlier objective was to discover a compact dictionary of context-parts whose logical OR \emph{reconstructs} the context signatures. That objective fails structurally:
+\begin{itemize}[nosep]
+\item \textbf{Reconstruction has no bottleneck.} Covering context bits rewards keeping every correlation, so the ``parts'' are whatever co-occurs --- dominated by the function-word scaffold, heavily overlapping, and unable to compress (empirically the part dictionary was \emph{larger} than the single-bit basis for equal coverage). The best reconstruction basis is just the individual bits; parts add nothing.
+\item \textbf{The real question is which bits \emph{matter}, not which are present.} ``Matter'' is only defined relative to a task. Reconstruction has no task, so it cannot separate a predictive part from an incidental co-occurrence.
+\end{itemize}
+Prediction supplies a \textbf{target} (a label). Then (i) part selection becomes well-posed --- a part is good iff it predicts the target, measured by information gain; and (ii) bounding the number of parts becomes a \emph{bottleneck} that forces the survivors to be the predictively useful ones (the role the low-rank constraint plays in attention's QK, and compression in an autoencoder). It is expected and correct that this destroys reconstruction completeness --- reconstruction is no longer the goal.
+
+
+\subsection{What we are building (pool discovery)}
+Attack both at once by decoupling \emph{how parts are found} from \emph{how they are used}:
+\begin{itemize}[nosep]
+\item \textbf{Discovery:} build many small trees on data subsets, each capped at $K$ leaves, and take the union of their splits as a large \emph{part pool}. Capping + subsetting starves noise-fitting (a capped tree on a subset cannot afford scaffold padding), so the pool is lean and non-overfit \emph{by construction}. Parts that recur across many subset-trees (frequency) are the robust ones.
+\item \textbf{Use:} keep a \emph{single conditional} global-split tree, but replace greedy \grow\ with an \textbf{argmax over the pool} at each node --- the part is chosen \emph{conditionally} (scored against the current partition, so ``conditionality lives in the tree'' is preserved) but drawn from the fixed, non-overfit pool rather than regrown. The threshold is re-fit per use; a chosen part is removed from the pool (no repeat).
+\end{itemize}
+This fixes greedy discovery (the pool sees parts greedy growth never reaches), fixes overfitting (capped-subset discovery + a lean pool), preserves conditionality (selection is partition-dependent), and is cheaper at build time (score pre-built parts instead of regrowing every node).
+
+
+\subsection{The two diagnosed weaknesses this addresses}
+Empirically the single global-split tree (i) overfit --- train accuracy climbed while held-out sat at the unigram floor, with no regularization sweet spot --- and (ii) discovered parts \emph{greedily}, one bit at a time, which is locally trapped and (the suspicion) pads parts with high-\cont\ scaffold bits that do not discriminate, producing heavy inter-part overlap. Both are \emph{search} problems, not representation problems: greedy growth explores a thin slice of part-space, and an unregularized single tree fits noise once leaves get thin.
+
+
+\subsection{Relationship to the reconstruction codebase}
+\textbf{Implement \S3--\S4 exactly as written. This is a prediction algorithm and most of it is new code.} The reconstruction codebase solved a different problem (Boolean-OR coverage); its objective, scoring, and threshold search are \emph{wrong here} and must not be carried over. Do not start from the old code and adapt it; do not hunt old functions to wire in.
+
+\noindent\textbf{Permitted reuse --- a closed whitelist (pure functions / loop shape only):}
+\begin{itemize}[nosep]
+\item \code{binarycore::sparse} primitives \code{info\_content}, \code{weighted\_dot}, and containment \cont{} --- used verbatim for the firing test (\S2.3). Pure functions; reuse as-is.
+\item \code{GROW\_PART}'s loop \emph{shape} only (greedy add-a-bit, test-then-commit, rollback, width cap, stop-when-nothing-improves). \textbf{Its scoring callback is new} (global gain via the joint multi-set sweep, \S3.4). If adapting the old skeleton is more error-prone than writing it fresh against \S3.4, write it fresh.
+\end{itemize}
+\textbf{Everything else is new} and must be written to this spec: the per-set and global gain (\S3.1, \S3.3), the joint multi-set threshold sweep (\S3.4, which \emph{replaces} the old single-set \code{FIT\_THRESHOLD} entirely), gain-based seeding, the macro loop (\S3.3), and the entire readout (\S4, no reconstruction analogue).
+
+%=====================================================================
+
+\section{Definitions}
+
+\subsection{The signature (input representation)}
+For each token occurrence, over a fixed inventory of $F$ subword pieces:
+\begin{itemize}[nosep]
+\item \textbf{$L$} --- the OR-pooled binary set of pieces in the \emph{left} context within a text window of radius $r$: bit $e$ is $1$ iff piece $e$ occurs at least once in the window (multiplicity discarded --- a set, not a multiset). $r$ is the \emph{only} place position enters; after pooling, order is gone.
+\item \textbf{$R$} --- same for the \emph{right} context.
+\item \textbf{$C$} --- the token's own identity (near-unique).
+\end{itemize}
+Throughout, ``bag'' means this OR-pooled binary set (no multiplicity). \textbf{Signatures and parts are piece-level; prediction targets are word-level} --- represent with pieces, predict with words. The firing primitives are
+\[
+\code{info\_content}(A)=\!\sum_{e\in A}\! w_e,\quad w_e=\log(N/c_e),\qquad
+\code{weighted\_dot}(A,B)=\!\!\sum_{e\in A\cap B}\!\! w_e,
+\]
+used only for the firing test (\cont, \S2.3), never for the split gain (\S3.1).
+
+\paragraph{Frozen artifacts (determinism prerequisite for a streamed build).}
+Three inputs to signature construction are \emph{frozen once, in a single prepass, and reused verbatim} across every pass, batch, and epoch of both discovery (\S6) and the consolidation build (\S8): (i) the $F$-piece inventory and the surprisal weights $w_e=\log(N/c_e)$; (ii) the part dictionary; and (iii) the label vocabulary (word$\to$id, size $V$, as in \S4.1). Under these, a signature \emph{and} its label are a pure, byte-identical function of the source text --- so a signature may be \emph{regenerated on demand} rather than stored (\S3.5), and a streamed build is reproducible. Constructing any of the three \emph{during} a streaming pass (e.g.\ first-seen vocab ids) would make ids pass-order-dependent and break determinism; build and freeze them before any tree is grown.
+
+
+\subsection{The versions (BERT / GPT)}
+The version is one atomic choice, fixed when the signature is built, that sets input, target, and held-out block together (exposing them separately risks a target leak):
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+field & \textbf{BERT} & \textbf{GPT}\\
+\midrule
+input $x$ (parts grow over) & $[L\,|\,R]$ (dim $2F$) & $[L\cup C]$ (dim $F$, one pooled bag)\\
+target $y$ (single word label) & the word $C$ & the \emph{next} word\\
+held out (never an input bit) & $C$ & $R$ (the future)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent\textbf{Leakage is structural:} the target's block is excluded from the input, so it can never enter as a split bit --- no runtime mask needed.
+
+\noindent\textbf{Feature namespace \& part storage.} A part is a set of bit \emph{indices} into the version's flat input space: $[0,2F)$ for BERT ($[0,F)=L$ band, $[F,2F)=R$ band) and $[0,F)$ for GPT. For BERT, ``piece \code{ing} in $L$'' and ``piece \code{ing} in $R$'' are two distinct features; for GPT the union is taken \emph{before} indexing, so left-context \code{ing} and current-word \code{ing} are the same feature (one $F$-dim set). Parts store raw indices; the ``side'' for BERT is implicit in whether the index is $<F$ or $\ge F$.
+
+\paragraph{Why these representations.}
+\begin{itemize}[nosep]
+\item \textbf{Piece inputs, word targets.} Pieces capture morphology (good for representation). Word-level targets make a tolerable error \emph{semantic} (a synonym) and make an \emph{orthographic} error (a mis-spelling that flips meaning) impossible by construction. Predict meaning, not spelling.
+\item \textbf{GPT input is one pooled bag $[L\cup C]$.} For generation the model conditions on ``the causal past,'' a single thing; the current token is its newest element. A separate splittable $C$ band would only enable spelling splits (grouping \code{run/running/runner}), reintroducing spelling reasoning on the input side. The current word's useful content is its identity, represented indirectly through its pieces (and, if exact identity is needed, a bigram at readout).
+\item \textbf{BERT keeps two bands $[L\,|\,R]$.} The two context sides bracket the hidden target from opposite directions --- two distinct roles, kept separate.
+\end{itemize}
+Both versions run the \emph{same} algorithm (\S3), differing only in the $(x,y)$ fields.
+
+
+\subsection{State, parts, threshold, sets, firing}
+Let $S=\{S_1,\dots,S_n\}$, initially $S=\{S_1\}$ with $S_1$ all training samples (each carrying its categorical label $y$). A part $p$ with threshold $t_p$ splits a set $S_i$ into
+\[
+S_{2i}=\{x\in S_i : \cont(x,p)\ge t_p\}\ (\text{fires}),\qquad
+S_{2i+1}=\{x\in S_i : \cont(x,p)< t_p\}\ (\text{does not fire}),
+\]
+\[
+\cont(x,p)=\code{weighted\_dot}(x,p)\,/\,\code{info\_content}(p)\quad(\text{surprisal-weighted containment; firing test only}).
+\]
+\textbf{Firing uses $\ge t_p$} (a sample exactly equal to the threshold fires); fixed everywhere (build and inference) for reproducibility.
+
+\paragraph{Unsplittable-by-this-split.} If a split yields $S_{2i}=\emptyset$ or $S_{2i+1}=\emptyset$, this $(p,t_p)$ does not split $S_i$: $g_i=0$ and $S_i$ is kept intact (no empty set is created). It is \emph{not} frozen --- a different later split may separate it. The only permanently terminal sets are \textbf{label-pure} ($H(S_i)=0$) or \textbf{identical-feature-vector} (all members share the same $x$). This status is checked \emph{once, at set creation}, and cached; such sets are marked \emph{inactive-for-gain} but are \textbf{not} removed from $S$ (see routing alignment).
+
+\paragraph{Routing alignment (train = inference).} An inactive-for-gain set keeps its samples in $S$ and \emph{continues to be routed through every later split}. Mandatory: at inference a test signature traces the entire ordered split sequence, so if training samples stopped routing early their stored path would diverge from the runtime encoder. ``Inactive-for-gain'' means excluded from the argmax sum, not removed from routing: inactive samples still move between child histograms in the sweep, but the running total skips their $g_i$.
+
+\paragraph{Support floor $s_{\min}$.} A candidate split is eligible in $S_i$ only if \emph{both children have $\ge s_{\min}$ samples} (equivalently, the smaller child by count $\ge s_{\min}$); otherwise it is treated as not splitting $S_i$ ($g_i=0$). This is a per-set property evaluated during the sweep --- not a global part-support count.
+
+
+%=====================================================================
+
+\section{Shared algorithm machinery}
+
+The gain, guards, and the three procedures below are used by both the premise check (\S5, per-node), the pool discovery (\S6), and the conditional tree (\S8). They are defined once here.
+
+\subsection{Per-set gain \texorpdfstring{$g_i$}{g\_i}}
+$H(S)$ is the entropy (in \textbf{nats}; natural log throughout, $0\ln 0:=0$, $H(\emptyset)=0$) of the label distribution in $S$ over the word vocabulary. The macro takes one \gfn{} as an argument.
+
+\paragraph{(a) Weighted entropy reduction (default).}
+\[
+g_i = |S_i|\,H(S_i) - |S_{2i}|\,H(S_{2i}) - |S_{2i+1}|\,H(S_{2i+1}).
+\]
+Both children are paid for (size-weighted), so a lopsided split leaves one large impure child that drags $g_i$ down --- high gain requires genuine, balanced purity improvement. (Gini may replace $H$; not meaningfully cheaper once histograms are maintained incrementally, so entropy is default.)
+
+\paragraph{(b) Gain ratio (optional).}
+\[
+\mathrm{SplitInfo}(S_i)=H\!\left(\tfrac{|S_{2i}|}{|S_i|},\tfrac{|S_{2i+1}|}{|S_i|}\right),\qquad
+g_i=\frac{|S_i|H(S_i)-|S_{2i}|H(S_{2i})-|S_{2i+1}|H(S_{2i+1})}{\mathrm{SplitInfo}(S_i)}.
+\]
+\textbf{Mandatory guard, in this order:} (1) compute the raw numerator $g_{\text{raw}}$; (2) \emph{eligibility gate}: apply the ratio only if $g_{\text{raw}}\ge\max(\overline{g_{\text{raw}}},\,g_{\text{floor}})$, where $\overline{g_{\text{raw}}}$ is the mean of the \emph{global} raw gain $g_{\text{raw,total}}(p,t)=\sum_i g_{\text{raw},i}$ over only candidates with $g_{\text{raw,total}}>0$, computed once after all candidates are scored (a two-stage pass); (3) for eligible candidates, $g_i=g_{\text{raw}}/\max(\mathrm{SplitInfo},\varepsilon)$. This closes the C4.5 divide-by-near-zero exploit \emph{and} the shaving anomaly (a shaved split has low $g_{\text{raw}}$, fails the gate).
+
+
+\subsection{The two small-set guards}
+\begin{itemize}[nosep]
+\item \textbf{Small child (shaving):} carving off a tiny pure child gives it $|S|H\approx0$ while the large child stays impure, so $g_i\approx0$. Killed by size-weighting each child term. Never use unweighted purity.
+\item \textbf{Small parent:} because $g=\sum_i g_i$ is an \textbf{absolute size-weighted sum --- summed across all sets, never averaged}, a small set's $g_i$ is already scaled by its small $|S_i|$. \textbf{Do not normalize $g$ by set count or size} --- that reintroduces small-parent bias.
+\end{itemize}
+
+
+\subsection{Global gain and the macro loop}
+$g(p,t_p)=\sum_i \gfn(S_i,\mathrm{split}(S_i,p,t_p))$, summed over all current sets, absolute (not averaged).
+
+\begin{lstlisting}
+BUILD():
+    S <- { all samples }
+    for iteration l = 1, 2, ... :
+        (p*, t_p*, g*) <- FIND_GLOBAL_SPLIT(S)     # sec 3.4
+        if g* <= 0: break                          # primary stop
+        # (optional safety caps: stop if l >= max_iterations or |leaves| >= max_leaves)
+        S <- { split(S_i, p*, t_p*) for each S_i, keeping unsplittable S_i intact }
+        LOG_ITERATION(l, p*, t_p*, g*, S)          # sec 5.3 -- required
+    return the ordered sequence of global splits and the leaf sets
+\end{lstlisting}
+$(p,t_p)$ is \emph{global} (same part+threshold applied to all sets). There is no dictionary budget; the tree grows until no split has positive gain.
+
+
+\subsection{Sub-algorithm: find \texorpdfstring{$(p,t_p)$}{(p,t\_p)} maximizing global gain}
+A single global threshold $t_p$ induces a split in every current set at once, and $g=\sum_i g_i$. Correctness hinges on the incremental update being \emph{per-set}, not global. Three procedures, all specified here in full.
+
+\subsubsection{\texorpdfstring{\code{SCORE\_PART}}{SCORE\_PART} --- best global threshold + gain for a fixed part}
+\begin{lstlisting}
+SCORE_PART(p, S):                       # returns (t_p*, g*) for this fixed part p
+  pts <- [ (cont(x,p), set_index(x), label(x)) for x in all samples in S ]
+  sort pts by cont DESCENDING           # sweep t high->low admits samples into FIRE child
+  for each set i:                       # init t=+inf: FIRE empty, NOT-FIRE = whole set
+      H_fire[i] <- {} ; H_not[i] <- histogram(labels of S_i) ; g_i[i] <- 0
+  g <- 0 ; best <- (t=+inf, g=0)         # no-split baseline always available
+  for each GROUP of pts sharing an IDENTICAL cont value t, descending:
+      for each (cont, i, label) in GROUP:
+          move label from H_not[i] to H_fire[i]        # this sample now FIRES, set i only
+          if set i is active-for-gain:
+              g <- g - g_i[i]
+              g_i[i] <- gain_fn(|S_i|, H(S_i), H_fire[i], H_not[i])   # respects s_min
+              g <- g + g_i[i]
+          # inactive sets are still MOVED (routing alignment) but never enter g
+      if g > best.g: best <- (t, g)      # evaluate ONLY after the whole group is moved
+  return best                            # (t_p*, g*); if nothing beats no-split, (+inf, 0)
+\end{lstlisting}
+\textbf{Notes.} \gfn{} is \S3.1. Parent entropy $H(S_i)$ is constant across the sweep; precompute once. \emph{$s_{\min}$ eligibility:} a threshold giving any split set a smaller child $<s_{\min}$ scores that set as unsplit ($g_i$ contribution $0$). \emph{Entropy is maintained incrementally}, never recomputed: keep per child histogram a running count $m$ and $\Sigma=\sum_c n_c\ln n_c$; then $H=\ln m-\Sigma/m$, and moving one label-$c$ sample updates only that term, $\Sigma\leftarrow\Sigma-n_c\ln n_c+(n_c{\pm}1)\ln(n_c{\pm}1)$, $m\leftarrow m{\pm}1$ (O(1) per move; a full recompute would be O(vocab)). Histograms are sparse (only nonzero words). \emph{Streaming:} \code{pts} is logical --- ``all samples in $S$'' means all training samples partitioned by current set, materialized \emph{transiently} (streamed/blocked, with an external deterministic sort for exactness), never a resident array; see \S3.5.
+
+\subsubsection{\texorpdfstring{\code{GROW\_PART}}{GROW\_PART} --- build one part greedily}
+Grows a single part bit-by-bit, scoring every candidate by the \emph{global} gain from \code{SCORE\_PART} (the reconstruction-era single-set coverage score is \emph{not} used):
+\begin{lstlisting}
+GROW_PART(S):                            # returns (p, t_p, g)
+  # --- SEED (empty part has undefined cont, so seed by single-bit global gain) ---
+  seed_bit <- argmax over all active bits e of  SCORE_PART({e}, S).g
+  p <- { seed_bit } ; (t_p, g) <- SCORE_PART(p, S)
+  # --- GREEDY GROWTH ---
+  repeat:
+      if |p| >= D: break                                   # width cap
+      B <- candidate bits for p (sec 3.4.3): bits with cont(x,p)>0, capped at B_max
+      best_add <- none ; best_g <- g
+      for each bit e in B, e not in p:
+          (t_e, g_e) <- SCORE_PART(p + {e}, S)             # full re-sweep: adding e changes cont
+          if g_e > best_g: best_g <- g_e ; best_add <- e ; best_t <- t_e
+      if best_add is none: break         # (a) no candidate improves global g -> stop
+      p <- p + {best_add} ; g <- best_g ; t_p <- best_t    # commit single best-improving bit
+  return (p, t_p, g)
+\end{lstlisting}
+\textbf{Best-first, not first-improving:} each step evaluates all candidate bits and commits the single one that most increases $g$; stop when no candidate improves $g$, the width cap $D$ is hit, or every candidate violates $s_{\min}$. A non-improving bit is skipped (rolled back), not a termination signal.
+
+\subsubsection{Candidate set \texorpdfstring{$B$}{B} and cost}
+For a non-empty $p$ the threshold is unknown during growth, so use \textbf{positive containment}: $B=\{$bits present in samples with $\cont(x,p)>0\}$. This is a \emph{search heuristic, not exhaustive} --- it cannot reach a bit that never co-occurs with the current part (the standard completeness-for-tractability trade of greedy growth). It keeps $B\ll 2F$; if still large, cap at the top-$B_{\max}$ bits by frequency. \textbf{Cost:} adding a bit changes $\cont$ for every sample, so the O(1)-per-move trick applies only \emph{within} one fixed part's sweep --- each candidate bit needs a fresh rebuild+sort+sweep. Total $O(D\cdot\min(B,B_{\max})\cdot n\log n)$, \emph{independent of the number of sets} (per-set histograms partition the same $n$). This is the real bottleneck; treat the default caps as an upper bound (in practice $B$ typically shrinks as a part grows).
+
+\subsubsection{\texorpdfstring{\code{FIND\_GLOBAL\_SPLIT}}{FIND\_GLOBAL\_SPLIT} --- the per-iteration search}
+\begin{lstlisting}
+FIND_GLOBAL_SPLIT(S):                    # returns the winning (p*, t_p*, g*)
+  (p, t_p, g) <- GROW_PART(S)            # one greedy part, scored by global gain throughout
+  return (p, t_p, g)                     # g <= 0 handled by BUILD's early-stop
+\end{lstlisting}
+\textbf{Single-seed default} ($m{=}1$). For robustness to a mediocre seed, optionally grow from the top-$m$ seed bits and return the best grown part; not required for correctness. \textbf{Tie-break} (for determinism): smaller popcount, then lexicographically smaller sorted bit-list, then larger $t_p$.
+
+\paragraph{Soundness.} A moved sample changes only its own set's children, so recompute only that set's $g_i$ and update $g\leftarrow g-g_i^{\text{old}}+g_i^{\text{new}}$; a single global histogram would be wrong (it pools labels across independently-partitioned sets). ``Identical \cont'' means IEEE bit-equality; if cross-hardware bit-exactness is required, quantize \cont{} (e.g. $\lfloor \cont\cdot10^7\rceil$) before sorting. Ties are evaluated as a group (all equal-\cont{} samples are on the same side of any threshold under $\ge$), so mid-group thresholds --- which are unrealisable --- are never scored. The optimal global gain \emph{typically decreases with depth} (one $t_p$ serving increasingly heterogeneous sets is a population compromise) but may rise transiently; not monotone, not a bug.
+
+\subsection{Execution and memory model (external-memory build, exact)}
+The build is defined over ``all training samples,'' but nothing here requires them --- or the fully-materialized signature dataset --- to be resident. Discovery (\S6) already streams: each subset tree is grown on one bootstrap draw and only its splits are kept. This subsection concerns the one build over the \emph{full} training set, the consolidation tree (\S8), where the sample count is large.
+
+\paragraph{What persists.} Only (a) the ordered list of committed global splits and (b) each node's sparse child label-histograms. Both are independent of the sample count. Nothing else is required-resident.
+
+\paragraph{Set-membership is derived, not stored.} A sample's current set at iteration $l$ is a pure function of its signature and the committed split prefix $(p^*_1,t^*_1),\dots,(p^*_{l-1},t^*_{l-1})$: replay the sample through those splits (\cont{} + threshold at each). It may be \emph{recomputed by replay} in the same pass that scores it (no separate routing pass; cost $O(l)$ \cont{}-evals per sample per iteration, $O(L^2)$ over a depth-$L$ build), or \emph{cached} as one integer per sample beside the sample on disk and updated after each commit ($O(1)$ per iteration, preferred when $L$ is large). Neither requires the dataset resident.
+
+\paragraph{Signatures stream.} \score{} needs, per part, only the triples $(\cont(x,p),\ \text{set}(x),\ \text{label}(x))$. These are produced by streaming the samples --- signatures read from a materialized store or regenerated from source under the frozen artifacts (\S2.1) --- in blocks, then discarded. The $\approx\!30\times$ expanded signature dataset is never held whole, on disk or in RAM.
+
+\paragraph{Exactness is preserved (this is Option~1, not an approximation).} The sweep still evaluates \emph{every} breakpoint. To recover the global descending-\cont{} order the exact sweep requires, either (i) \emph{block over parts} --- hold the triples for a block of $B_{\text{pool}}$ parts, sort each in memory --- or (ii) \emph{external-sort} per part. Both yield $(t_p^*,g^*)$ \emph{byte-identical} to the in-memory sweep, provided the sort is a total, deterministic order --- which the \S3.4.4 quantization ($\lfloor \cont\cdot10^7\rceil$) plus the tie-break already define. A binned/quantile threshold that would avoid the sort is a \emph{separate, semantically-scoped change} and is explicitly deferred (\S11).
+
+\paragraph{The one synchronization point.} The per-iteration argmax (over pooled parts in \S8, or over candidate bits in \grow) is a reduction across all batches: reduce per-candidate gains / per-child histograms, then commit. The reduction is over sufficient statistics, not data, and changes nothing numerically.
+
+\paragraph{The knob.} Streaming trades resident memory for repeated passes over the (streamed or regenerated) signatures --- one score pass per iteration, plus replay. Cache the materialized store when it fits; regenerate when it does not.
+
+%=====================================================================
+
+\section{Readout: leaf distribution, smoothing, calibration gate}
+
+The premise check (\S5) reads predictions directly from leaf label-distributions; the conditional tree (\S8) does the same. The path decoder is retained only as a fallback (\S4.2). Smoothing, the floor, and the calibration gate below apply to every readout.
+
+\subsection{Stored statistics and smoothing (train time)}
+Store \textbf{counts, not probabilities}. Per split \emph{node}, keep the label count histogram of each child, $N(w\mid \text{node},\text{branch})$ for $\text{branch}\in\{\text{fire},\text{not-fire}\}$, and the child totals $m_{\text{node},\text{branch}}$ (exactly the $H_{\text{fire}}/H_{\text{not}}$ the build maintains), stored sparsely. Also store global unigram counts $N(w)$ and total $M$. Probabilities are derived at decode with Laplace/Dirichlet smoothing:
+\[
+P(w\mid \text{node},\text{branch})=\frac{N(w\mid\cdot)+\alpha_s}{m_{\text{node},\text{branch}}+\alpha_s V},\qquad
+P(w)=\frac{N(w)+\alpha_s}{M+\alpha_s V},
+\]
+with $\alpha_s$ small (default $0.1$; large $\alpha_s$ over-smooths mid-size nodes) and $V$ the \textbf{global tokenizer vocabulary size} (fixed across builds and inference). This guarantees $P(\cdot)>0$, so all logs are finite.
+
+
+\subsection{Path decoder (fallback only --- the leaf distribution is the primary readout)}
+Let $\mathrm{path}(x)=[n_1,\dots,n_d]$ ($d\ge1$) be the split nodes $x$ passes through, $b_k$ the branch taken at $n_k$, $P_k(w)=P(w\mid n_k,b_k)$, and $m_k$ that child's support.
+\[
+w_k=\frac{m_k}{m_k+\kappa},\qquad
+\mathrm{score}(w)=\log P(w)+\sum_{k=1}^{d} w_k\big[\log P_k(w)-\log P(w)\big],
+\]
+\[
+\widehat P(w)=\mathrm{softmax}_w(\mathrm{score}(w)),\qquad
+P_{\text{out}}(w)=(1-\beta_{\text{floor}})\widehat P(w)+\beta_{\text{floor}}\,P(w).
+\]
+\textbf{Support-weighting} is Bayesian-inspired shrinkage: a small-support child's log-odds are high-variance, so they are shrunk toward $0$ ($\kappa$ sets the strength). It is a variance regularizer on the \emph{signal} term $[\log P_k-\log P]$, not a claim that high-support splits carry more signal (a well-supported split with $P_k\approx\text{prior}$ still contributes $\approx0$). \textbf{Nested $\Rightarrow$ log-odds is sound here:} splits along a path partition what the previous left, so evidence telescopes rather than double-counting (a flat overlapping part-set would multiply-count --- why a flat naive-Bayes readout was rejected).
+
+
+\subsection{Unigram floor (interpolation)}
+$P_{\text{out}}=(1-\beta_{\text{floor}})\widehat P+\beta_{\text{floor}}P$, $\beta_{\text{floor}}\in(0,1]$ (default $0.1$). This guarantees $P_{\text{out}}(w)\ge\beta_{\text{floor}}P(w)$ for every word and is already normalized (a convex combination of two distributions). The mass on any word is at least a fixed fraction of unigram --- it cannot be driven to $\approx0$ on a frequent word. \emph{Not} $\max(\widehat P,P)$ then renormalize: that fails (prior $[.5,.5]$, $\widehat P=[.6,.4]\to\max[.6,.5]\to$ renorm $[.545,.455]$, so word 2 fell below prior). A hard $\ge P$ for all words is impossible while normalized.
+
+
+\subsection{Readouts that FAIL --- do not re-attempt}
+\begin{itemize}[nosep]
+\item IG-/gain-weighted mixture over a flat part-set: weights by coverage not sharpness; hurts log-loss, and assumes a flat part-set the tree replaced.
+\item Purity / single-node argmax: discards the rest of the path; high-variance on thin leaves.
+\item Raw summed log-odds (weight 1): overconfident; use the support-weighted form.
+\item Uniform $1/d$ averaging: weights a deep path's well-supported ancestors \emph{less} than a short path's --- backwards. Retained only as a baseline the default should beat.
+\end{itemize}
+
+
+\subsection{Readout invariants (tests)}
+(1) Floor: assert $P_{\text{out}}(w)\ge\beta_{\text{floor}}P(w)$ for all $w$ (\emph{not} $\ge P(w)$). (2) Normalized: $\sum_w P_{\text{out}}(w)=1$. (3) Anti-drown (shipping gate, not an identity): held-out log-loss $\le$ that of the best single node on the path; if the default fails, tune $\kappa,\beta_{\text{floor}}$ on validation, else ship the best-single-node fallback (never worse than its best node). (4) $d\ge1$ always.
+
+
+\subsection{Calibration gate (failing it INVALIDATES any result)}\label{sec:gate}
+\textbf{Gate (hard):} on held-out, the decoder's \textbf{log-loss $\le$ unigram log-loss}. A decoder with log-loss $>$ unigram is \emph{broken} (it assigns less probability to the truth, on average, than the context-free prior; the floor bounds worst-case per-word mass but does not by itself guarantee mean log-loss $\le$ unigram). Fix before its accuracy means anything. Common causes, in order: (1) \emph{normalizer keeps mass for leaf-ruled-out words} (the softmax $Z$ must be over the support actually used --- a real shipped bug); (2) floor too weak --- raise $\beta_{\text{floor}}$; (3) support-weighting over-trusts thin leaves --- raise $\kappa$. \textbf{Guarantee:} because $\beta_{\text{floor}}\to1$ yields exactly the unigram distribution, a correct decoder can \emph{always} reach $\le$ unigram; failing the gate is proof of an implementation bug, not a property of the data. \textbf{Report the $\beta_{\text{floor}}$ at which the gate passes} --- if only near $1$, the tree/readout adds nothing (a real finding), distinct from a normalizer bug (fixable).
+
+
+\section{Premise check --- the confirming experiment}\label{sec:premise}
+
+This is a complete, standalone experiment. Run it first. If it fails, none of \S6--\S9 is built. Every parameter and decision is fixed here.
+
+\subsection{What it must distinguish}
+Two mutually-exclusive diagnoses of the single tree's failure:
+\begin{itemize}[nosep]
+\item \textbf{H\textsubscript{overfit}:} signal is present and extractable \emph{from the leaf in isolation}, but the greedy unregularized tree fit it to noise. $\Rightarrow$ the pool design (\S6--\S8) is the correct fix; build it.
+\item \textbf{H\textsubscript{leaf-weak}:} the representation \emph{does} carry signal, but it lives in the \emph{path} (ancestor splits + unigram backoff), not in the isolated leaf histogram. The raw leaf cannot surface it; a leaf-only pool would sit at the unigram floor, but a path/backoff readout can (and, on this data, already has: see the discriminator below). $\Rightarrow$ do \textbf{not} build the leaf-only pool as written; keep the path decoder (\S4.2) as the pool tree's readout (now the specified design, \S8) --- validated on the pool tree's own paths (\S8.1) --- rather than the isolated leaf.
+\item \textbf{H\textsubscript{signal-poor}:} the representation carries \emph{no} extractable signal --- \emph{even a calibrated path decoder} cannot beat the prior. $\Rightarrow$ neither the pool nor a decoder helps; reconsider the representation (window radius $r$, the $[L\cup C]$ union, adding limited order).
+\end{itemize}
+The experiment removes the two confounds that previously made these indistinguishable: \emph{overfitting} (by capping + regularizing) and \emph{a broken decoder} (by reading the leaf distribution directly). But the leaf-only readout \emph{cannot by construction} separate H\textsubscript{leaf-weak} from H\textsubscript{signal-poor} --- both give a raw leaf that fails to beat unigram. That separation requires one extra measurement (the \emph{discriminator}, \S5.4): whether a \emph{calibrated path decoder} beats unigram on the same split. Leaf log-loss decides overfit-vs-not; the path-decoder check decides leaf-weak-vs-signal-poor.
+
+
+\subsection{The model: one regularized, capped CART tree}
+Build a single per-node CART tree (not a global-split tree --- the premise check needs a clean $K$-leaf cap and per-node regularization, and CART is the discovery-tree type anyway, \S3.1):
+\begin{itemize}[nosep]
+\item \textbf{Splits.} At each node, choose the single part+threshold maximizing the per-set gain (\S3.1, weighted-entropy reduction) \emph{on that node's samples only} (per-node, not global). The part is grown by the \grow\ control flow scored by that node-local gain; the threshold by \score\ on the node. This reuses the shared machinery of \S3 unchanged, restricted to one node.
+\item \textbf{Cap.} Stop splitting a node when any of: the node has $<2\,s_{\min}$ samples (cannot make two $\ge s_{\min}$ children); the node is label-pure; or the tree has reached $K$ leaves total (default $K=8192$, exposed as a flag). Grow best-first by gain (expand the highest-gain eligible node next) so the $K$-leaf budget is spent on the most informative splits.
+\item \textbf{Regularization (the sweep).} $s_{\min}$ (minimum samples in each child) is the regularizer. Sweep $s_{\min}\in\{1,10,20,30,50,100\}$; each value yields one tree and one metric row. This brackets from overfit ($s_{\min}=1$) to underfit ($s_{\min}=100$) so a held-out sweet spot, if one exists, is found rather than assumed.
+\end{itemize}
+
+
+\subsection{The readout: leaf label-distribution, smoothed --- no decoder}
+A discriminative tree's leaf \emph{is} the predictor. For a test signature routed to leaf $\ell$, the predicted distribution is the leaf's smoothed label histogram:
+\[
+P_{\text{leaf}}(w\mid \ell)=\frac{N(w\mid\ell)+\alpha_s}{m_\ell+\alpha_s V},
+\]
+with $\alpha_s$ and $V$ exactly as \S4.1: $\alpha_s=0.1$, $V=$ global tokenizer vocabulary. \textbf{No path decoder, no support-weighting, no interpolation floor} --- those exist to rescue thin overfit leaves, which is the very thing under test. To also guard against a thin-leaf blow-up \emph{without} reintroducing the decoder, additionally report the interpolation-floored variant $P_{\text{out}}=(1-\beta_{\text{floor}})P_{\text{leaf}}+\beta_{\text{floor}}P(w)$ at $\beta_{\text{floor}}=0.1$ (\S4.3) as a second row --- but the \emph{primary} readout is the raw smoothed leaf, so the check cannot be accused of the decoder doing the work.
+
+
+\subsection{Metrics --- exactly what to compute}
+On a held-out cross-corpus split, per $s_{\min}$ value, compute and report \emph{all} of:
+\begin{center}
+\begin{longtable}{@{}ll@{}}
+\toprule
+Quantity & Definition\\
+\midrule
+\endhead
+\code{ll\_leaf} & mean held-out log-loss (nats) of $P_{\text{leaf}}$ --- \textbf{the decision metric}\\
+\code{ll\_leaf\_floored} & mean held-out log-loss of the $\beta_{\text{floor}}{=}0.1$ variant (thin-leaf guard)\\
+\code{acc\_leaf} & held-out top-1 accuracy of the leaf-majority prediction\\
+\code{ll\_unigram} & unigram log-loss, \emph{same} $\alpha_s,V$ smoothing --- the bar to beat\\
+\code{ll\_bigram} & bigram (keyed on current word) log-loss, same smoothing --- the target\\
+\code{acc\_unigram}, \code{acc\_bigram} & the accuracy baselines (context, not decision)\\
+\code{the\_rate} & fraction of held-out predictions $=$ most-frequent word\\
+\code{train\_ll\_leaf} & \emph{train} log-loss of $P_{\text{leaf}}$ (to see the train/held-out gap directly)\\
+\code{n\_leaves} & realized leaf count at this $s_{\min}$\\
+\code{ll\_path\_gated} & held-out log-loss of the \emph{calibrated path decoder} (\S4.2, tuned to pass the gate \S4.6) on the \textbf{same} split --- \textbf{the discriminator between H\textsubscript{leaf-weak} and H\textsubscript{signal-poor}}\\
+\bottomrule
+\end{longtable}
+\end{center}
+All log-losses in nats, natural log, same $\alpha_s{=}0.1$ and global $V$ everywhere (a baseline computed with different smoothing is invalid --- \S10.1). ``Held-out'' is a corpus split disjoint from training; the same split is used for every $s_{\min}$ value and for the baselines.
+
+
+\subsection{The decision rule (binding --- no interpretation latitude)}
+Let $\ell^\star=\min_{s_{\min}} \code{ll\_leaf}$ (best held-out leaf log-loss over the sweep) and $u=\code{ll\_unigram}$.
+\begin{enumerate}[nosep]
+\item \textbf{If $\ell^\star \le u - \tau$} (a real margin, $\tau=0.02$ nats to exceed noise): \textbf{H\textsubscript{overfit} confirmed}. The signal is extractable once overfitting is controlled by $s_{\min}$. \textbf{Build the pool design (\S6--\S8).} Record the winning $s_{\min}$ and how close $\ell^\star$ gets to \code{ll\_bigram} --- that gap is the headroom the pool must then close.
+\item \textbf{If $\ell^\star > u - \tau$ at every $s_{\min}$} (leaf log-loss never meaningfully beats unigram, at any regularization): the raw leaf is untrustworthy on this representation. \textbf{This alone does not decide signal-poverty} --- consult the discriminator \code{ll\_path\_gated}:
+  \begin{itemize}[nosep]
+  \item \textbf{Rule 2a --- H\textsubscript{leaf-weak}:} if the calibrated path decoder \emph{beats} unigram (\code{ll\_path\_gated} $\le u - \tau$, and it passes the gate \S4.6), the signal is present but lives in the path, not the leaf. \textbf{Do not build the leaf-only pool as written} (it would sit at the unigram floor). The pool tree therefore uses the calibrated path decoder as its readout (now the specified design, \S8), validated on its own paths (\S8.1). \emph{This is not a signal-poverty result.}
+  \item \textbf{Rule 2b --- H\textsubscript{signal-poor}:} if even the calibrated path decoder \emph{cannot} beat unigram (\code{ll\_path\_gated} $> u - \tau$), no readout extracts signal from this representation. \textbf{Do not build the pool; reconsider the representation} (radius $r$, the $[L\cup C]$ union, adding limited order).
+  \end{itemize}
+  \textbf{Do not report a signal-poverty verdict (2b) on the strength of the leaf result alone} --- the leaf failing to beat unigram is consistent with both 2a and 2b, and only \code{ll\_path\_gated} tells them apart. (The isolated-leaf readout cannot surface path/backoff signal by construction; concluding ``signal-poor'' from it would repeat the session's recurring error of indicting the objective on a readout artifact.)
+\item \textbf{Guard --- invalid run:} if even the \emph{floored} readout has \code{ll\_leaf\_floored} $>u$ (worse than unigram after interpolation), the leaf readout is mis-implemented (a normalizer keeping mass for leaf-absent words --- \S4.6 cause 1). \textbf{The run is invalid}; fix the readout and re-run before applying rule 1 or 2. Because $\beta_{\text{floor}}\to1$ recovers unigram exactly, a correct floored readout can \emph{never} be worse than unigram; if it is, it is a bug, not a finding.
+\end{enumerate}
+
+\paragraph{Why accuracy is not the decision metric.} A capped tree can sit at unigram \emph{accuracy} (argmax on the majority word) while its \emph{distribution} is either informative (log-loss $<$ unigram $\Rightarrow$ H\textsubscript{overfit}) or not (log-loss $\approx$ unigram). Accuracy cannot tell these apart; log-loss can. This is the exact confound that produced the earlier false ``architecture is broken'' conclusion, and the rules above are written on log-loss --- and, for the leaf-weak-vs-signal-poor split, on the \emph{path-decoder} log-loss --- precisely to avoid repeating it (\S10.1).
+
+
+\subsection{Deliverable for the check}
+CLI \code{premise\_check --K 8192 --smin-sweep 1,10,20,30,50,100}, emitting the metric table above (one row per $s_{\min}$, plus the unigram/bigram baseline row) as CSV, and additionally the calibrated path-decoder log-loss \code{ll\_path\_gated} on the same split (the \S5.5 discriminator), and printing the rule-1/2a/2b verdict explicitly. Reuses the signature construction (\S2.1), \cont, \grow\ (node-local, \S3.4), \score, and the \S4.1 smoothing; patch \code{CMakeLists.txt} in the same change. This is $\approx$ one capped CART build $\times 6$ regularization values --- a day of compute, and it gates an entire subsystem.
+
+%---------------------------------------------------------------------
+
+\section{Part pool discovery}
+
+\subsection{Capped-subset CART trees}
+Draw $T$ data subsets and grow one \emph{per-node CART} tree on each (see the resolution below for why CART), capped at $K$ leaves, using the gain (\S3.1, node-local) and threshold sweep (\score, \S3.4). The \emph{splits} discovered across all $T$ trees (each a bit-pattern; thresholds are discarded --- re-fit at use time, \S8) form the \textbf{raw pool} $\mathcal{P}_0$.
+
+\textbf{Defaults (concrete, so nothing is left open):} $T=100$ subset trees (embarrassingly parallel; raise later if the pool is too sparse); each subset is a bootstrap draw of the training data ($\approx63\%$ unique rows) --- the bagging sweet spot between lean/diverse (smaller) and stable (larger); $K=8192$ leaves per tree (shared option, \S2). Raw pool size $\approx T\cdot K \approx 100\times 8192 \approx 8.2\times10^5$ parts before pruning.
+
+\paragraph{Discovery trees are per-node CART (resolved).} Discovery trees use ordinary per-node (CART) splits --- one node split per step --- \emph{not} global splits. Two reasons: (i) the $K$-leaf cap is then clean and unambiguous (a global split creates many leaves at once and would blow past $K$ in a single step); (ii) per-node discovery grows leaner, more local parts (it never applies one part to unrelated partitions), which reduces inter-part overlap at the source and yields the large, diverse vocabulary the pool wants. \textbf{Discovery (CART) and the final tree (\S8, global-split) therefore use different split types --- this is intentional, not an inconsistency:} discovery only produces a \emph{vocabulary of bit-patterns}; the final tree re-scores each pattern globally (threshold re-fit, conditional gain, \S8), so the split type only needs to match at \emph{use}, not at \emph{discovery}. The leaf cap $K$ (default $8192$) is a shared option, identical here and in the premise check (\S5).
+
+
+\subsection{Frequency prune}
+$\mathcal{P}_0$ is large ($\sim8\times10^5$). Collapse it to a working pool $\mathcal{P}$ of size $M$ by \textbf{cross-tree frequency}: a bit-pattern (or a near-duplicate cluster, \S7) appearing in many subset-trees is robust and non-overfit; keep the top-$M$ by frequency, breaking ties by mean discovery-gain (frequency first for robustness, gain second for quality). \textbf{Default $M=30{,}000$} (tune empirically in $[10^4,5\!\times\!10^4]$: it sets the per-node argmax cost $O(M\,n\log n)$, \S8; drop toward $10^4$ if the argmax is too slow or the pool too redundant, raise toward $5\!\times\!10^4$ if the overlap health-check shows the pool is clean and more parts help). $M=30{,}000$ is still a ``massive'' vocabulary versus a single greedy tree's few-hundred splits. Frequency-pruning does triple duty: it bounds the argmax cost, it is the overfitting guard (frequent $\Rightarrow$ survived many independent subsets), and it picks a canonical representative per near-duplicate cluster, so no separate exact-dedup pass is needed.
+
+%---------------------------------------------------------------------
+
+\section{Part refinement (\texorpdfstring{\refine}{REFINE\_PART}) --- selectable moves, chosen by evaluation}
+
+\refine\ takes a part $p^*$ (from discovery or from the node argmax) and its near-best overlapping neighbors, and tries \emph{bounded} bit-modifications to produce a leaner / better-generalizing part. \textbf{Every candidate modification is re-scored from scratch} via \score\ --- because \cont\ is a ratio (\S2.3), a bit-modified part fires a different population and its gain must be \emph{measured}, never extrapolated. This is what makes mask/merge/flip sound here where naive bit-surgery was not: nothing is trusted, everything is scored.
+
+\paragraph{Two invariants shared by all moves.}
+\begin{itemize}[nosep]
+\item \textbf{No new bits.} Every move only \emph{recombines validated bits} --- bits already in $p^*$ or in a near-best overlapping neighbor. No move introduces a bit that was not already discriminative somewhere. This bounds per-candidate overfitting risk to near-zero: the search cannot manufacture fresh signal to fit noise, only toggle contested-among-good-parts bits.
+\item \textbf{Held-out acceptance.} A modification is accepted only if it improves \emph{held-out} gain (on a validation slice of the subset), not training gain. Individual moves are low-risk (no new bits), but selecting the best of many synthetics on \emph{training} gain reintroduces selection bias --- the held-out gate closes it.
+\end{itemize}
+
+\paragraph{Neighborhood bound.} The near-best set is limited by a gain margin $\delta$ and an overlap threshold (surprisal-weighted Jaccard): only parts within $\delta$ of the current best \emph{and} overlapping it above threshold contribute. This keeps the contested-bit set $\Delta$ and the candidate count small, so refinement is cheap relative to the growth/discovery that produced $p^*$.
+
+
+\subsection{The move options}
+\refine\ is parameterized by \code{--refine <mode>} plus orthogonal toggles. Each mode is a hypothesis about how to improve a part; \textbf{they are compared empirically (\S10), not chosen by argument.}
+
+\paragraph{\code{none} (baseline).} No refinement; $p^*$ is used as discovered. This is the baseline every other mode must beat on held-out log-loss --- if no mode beats \code{none}, refinement is not helping and should be off.
+
+\paragraph{\code{mask\_core}.} Test each bit \emph{already in} $p^*$ for removal: for each $b\in p^*$, score $p^*\setminus\{b\}$; if held-out gain holds (or improves), drop $b$. Pure lean-ification --- strictly fewer bits, can only generalize, cannot add overfitting. This is the direct antidote to scaffold padding: a padded part sheds its inert shared bits, lowering pool overlap at the source. Includes the \emph{shared-core} bits (those all neighbors agree on), which the flip move below would otherwise never test.
+
+\paragraph{\code{merge\_union}.} Pull in validated bits from near-best overlapping neighbors: for a neighbor $p'$, score $p^*\cup\{b\}$ for $b\in p'\setminus p^*$; accept improving additions. Reaches conjunctions greedy growth could not climb to (it would have to pass through lower-gain intermediates), drawing only from already-validated bits.
+
+\paragraph{\code{flip\_delta} (unifies mask + merge over the contested set).} Let the \emph{contested bits} be the symmetric difference $\Delta=(p^*\cup\text{neighbors})\setminus(p^*\cap\text{neighbors})$ --- the bits some near-best parts have and others lack. Greedily flip the single best-improving contested bit (present$\to$absent = mask; absent$\to$present = merge), re-derive $\Delta$ against the neighbors, and repeat until no contested flip improves (held-out gated). This resolves the disagreement region among near-best parts by measurement rather than by bit-voting (which was rejected: voting assumes the union's split without checking). Best-first over $\Delta$, same discipline as growth but restricted to validated contested bits. \emph{Recommended default when refinement is on}, paired with \code{mask\_core} for the shared core $\Delta$ does not cover.
+
+\paragraph{\code{used\_bit\_penalty($\rho$)} (orthogonal toggle; a selection-time overlap force).} Down-weight bits already used by earlier splits when scoring \emph{new} parts: a bit's gain contribution is scaled by $\rho^{u}$ where $u$ is its prior-use count ($\rho\in[0,1]$; $\rho=1$ = off). This is a \emph{soft} pressure toward low overlap, and --- unlike a hard global mask --- it is re-scored, so it never mis-fires on \cont\ grounds. \textbf{Caveat (why it is a toggle, not the default):} it changes the objective from ``best split'' to ``best split, discounted by bit-reuse,'' so it can suppress a \emph{conditionally}-best split that legitimately reuses a bit in a different partition. Prefer reducing overlap at the pool (\code{mask\_core} + frequency-prune) so the argmax faces few overlapping candidates and needs no penalty; expose $\rho$ as a knob and \emph{measure} whether any $\rho<1$ beats $\rho=1$ on held-out log-loss. If a lean pool already yields low selection-overlap, leave $\rho=1$.
+
+\paragraph{\code{deep} (orthogonal toggle; interaction search).} Instead of greedy single-bit flips over $\Delta$, search small \emph{combinations} of contested-bit flips (up to a cap $c$, e.g.\ $c=3$), for interactions a greedy flip misses (bits $a,b$ good only together). Bounded to $\binom{|\Delta|}{\le c}$ candidates; only worthwhile if $|\Delta|$ is small (guaranteed by the neighborhood bound). Layers on \code{flip\_delta}.
+
+\paragraph{Combination policy.} \code{none}, \code{mask\_core}, \code{merge\_union}, \code{flip\_delta} are \emph{mutually exclusive modes} (pick one per run, for a clean comparison). \code{deep} and \code{used\_bit\_penalty} are \emph{orthogonal toggles} that layer on any mode. The evaluation (\S10) is an ablation over $\{$\code{none}, \code{mask\_core}, \code{merge\_union}, \code{flip\_delta}$\}$, then \code{flip\_delta}${}+{}$\code{deep}, then \code{flip\_delta}${}+{}$\code{used\_bit\_penalty} at a few $\rho$ --- not the full cross-product.
+
+
+\subsection{\texorpdfstring{\refine}{REFINE\_PART} in pseudocode (mode = \code{flip\_delta})}
+\begin{lstlisting}
+REFINE_PART(p*, S, pool, mode, val):     # val = held-out slice for acceptance
+  if mode == none: return p*
+  repeat until no accepted change:
+    nbrs  <- { q in pool : gain(q) >= gain(p*) - margin  and  overlap(q,p*) >= tau }
+    Delta <- symmetric_difference(p*, union(nbrs))       # contested bits (flip_delta)
+    core  <- p*                                          # (mask_core also tests these)
+    cands <- { flip(p*, b) for b in Delta }              # +{ p* \ {b} for b in core } if mask_core
+    best <- argmax over cands c of  SCORE_PART(c, S).g
+    if heldout_gain(best, val) > heldout_gain(p*, val):  p* <- best
+    else: break
+  return p*
+\end{lstlisting}
+Modes \code{mask\_core} / \code{merge\_union} restrict \code{cands} to the removal / addition subset respectively; \code{deep} replaces single-bit \code{flip} with $\le c$-bit combinations; \code{used\_bit\_penalty} scales each candidate's gain by $\rho^{u}$ before the argmax. All paths end at the same held-out acceptance test.
+
+%---------------------------------------------------------------------
+
+\section{The conditional tree over the pool}
+
+
+The final model is a \emph{single} global-split tree (\S3.3 macro loop), with one change: \grow\ is replaced by an \textbf{argmax over the pool}.
+
+\begin{lstlisting}
+FIND_GLOBAL_SPLIT_POOL(S, pool):         # replaces GROW_PART / FIND_GLOBAL_SPLIT
+  best <- (none, -inf)
+  for each part p in pool:               # p is a bit-pattern; threshold re-fit here
+      (t_p, g) <- SCORE_PART(p, S)        # conditional: scored against CURRENT partition
+      if g > best.g: best <- (p, t_p, g)
+  p* <- best.p
+  p* <- REFINE_PART(p*, S, pool, mode, val)    # optional (sec 7); re-fit threshold after
+  (t_p*, g*) <- SCORE_PART(p*, S)
+  pool <- pool \ { p* }                   # remove-on-use: no part fires twice
+  return (p*, t_p*, g*)
+\end{lstlisting}
+
+\paragraph{Properties.}
+\begin{itemize}[nosep]
+\item \textbf{Conditional.} Each part is scored against the current partition, so later splits still refine within what earlier splits produced --- the property the base tree has and a flat top-$K$ pool would lack.
+\item \textbf{Threshold re-fit per use.} The pool stores bit-patterns; $t_p$ is swept fresh at each use (overfitting was on discovery/purity, not threshold). Cheap: one \score\ per part, no growth.
+\item \textbf{Remove-on-use.} A chosen part leaves the pool; the same conjunction cannot fire twice. This handles \emph{lineage} redundancy; \emph{cross-partition} near-duplicates are handled by the frequency-prune upstream.
+\item \textbf{Prediction = calibrated path decoder (\S4.2), not the isolated leaf.} The premise check (\S5) established --- via the \S5.5 discriminator, on this data --- that the target signal on $[L\cup C]$ lives in the \emph{path} (ancestor splits + support-weighted backoff), not in the leaf histogram alone: the raw leaf never beats unigram (best $6.341>6.319$), while the calibrated path decoder clears both unigram and bigram ($6.058<6.123<6.319$), and the two curves move in \emph{opposite} directions under regularization (leaf best when shallow, path best when deep) --- mechanism, not noise. \textbf{The pool tree therefore uses the calibrated path decoder of \S4.2 as its readout} (tuned to pass the gate \S4.6), \emph{not} the raw leaf. This readout must be \textbf{validated on the pool tree's own paths before anything is built on top} (\S8.1).
+\item \textbf{External-memory (streamed), exact.} The build holds only the ordered split list and per-node child histograms resident (both independent of sample count); each sample's set-membership is replayed from the committed split prefix, and the $M$-part argmax is a per-node reduction of candidate gains over streamed batches of signatures (\S3.5). Neither the fully-materialized signature dataset nor all samples need be resident, and the exact sweep is preserved by blocking / external-sort, so the streamed build is byte-identical to an in-memory one (\S10.6, inv.~10).
+\item \textbf{Cost.} Per node $O(M\cdot n\log n)$ (score $M$ pooled parts), replacing \grow's $O(D\cdot B\cdot n\log n)$ regrowth. With $M$ frequency-capped, this is bounded and parallelizable; discovery cost moves offline to the (embarrassingly parallel) subset trees.
+\end{itemize}
+
+\subsection{Readout-validation gate (build this tree, prove the readout, \emph{then} build \S7 and \S10)}
+The path decoder is proven to clear the gate on \emph{grown} trees, but the pool tree draws its parts by \textbf{argmax over a fixed, frequency-pruned pool} rather than growing them per node --- and that substitution is the one untested link. \textbf{Isolate exactly it}, and no more:
+\begin{itemize}[nosep]
+\item \textbf{Already proven, do not re-test.} (i) \emph{Global-split structure carries the path signal}: the \S5.2-style global-split tree's calibrated path decoder hit $6.070<$ bigram $6.123$ on this split --- so global-split-vs-CART is \emph{not} the gap. (ii) \emph{Path/backoff extracts the signal}: the \S5.5 discriminator ($6.058$) settled that. Re-running either wastes effort.
+\item \textbf{The one thing to measure: argmax-over-pool vs grown parts.} Does sourcing parts from the fixed pool (with remove-on-use) still yield paths whose support-weighted backoff clears the gate? Build a \emph{small} pool (\S6), build the conditional global-split tree over it (\code{FIND\_GLOBAL\_SPLIT\_POOL} above, \emph{no} \refine, \emph{no} ablation), apply the calibrated path decoder (\S4.2) to \emph{its} paths, and report held-out log-loss vs unigram/bigram, gate-checked (\S4.6), on the same split.
+\end{itemize}
+
+\noindent\textbf{Binding gate (same discipline as \S5):}
+\begin{itemize}[nosep]
+\item \textbf{Pass} --- pool-tree path decoder $\le$ unigram by margin $\tau=0.02$ nats (ideally near the grown-tree's $\approx6.06$, and below bigram): argmax-over-pool preserves the path signal. \textbf{Proceed to build refinement (\S7) and the evaluation ablation (\S10).}
+\item \textbf{Fail} --- pool-tree path decoder sits at the unigram floor while a grown-tree path decoder on the same data clears it: the pool-sourcing is what destroys the signal (e.g.\ the frequency-pruned pool lacks the conditionally-sharp parts that grown paths rely on). \textbf{Do not build \S7/\S10.} The finding is specific and useful --- the signal needs \emph{grown} conditional parts, so either widen the pool (raise $M$, loosen the frequency prune) until the gate passes, or abandon pool-sourcing and keep growth. Diagnose before scaling.
+\end{itemize}
+\textbf{Do not build \refine\ or the ablation until this gate passes.} It is the checkpoint that converts ``keep the path decoder'' from an assumption into a proven link --- the one untested edge between ``path decoder works on grown trees'' (established) and ``\dots on the pool'' (here decided by measurement).
+
+\subsection{Headroom / depth sweep (run before the \S7 ablation, to make it interpretable)}
+Once \S8.1 passes, the pool tree beats bigram --- but by a small margin ($\approx6.06$ vs bigram $6.123$, unigram $6.319$). Before investing in the refinement ablation (\S7, \S10), \textbf{establish where that number sits relative to the representation's ceiling}, so the ablation's deltas are read against a known scale rather than in a vacuum. A mode that moves $6.06\to6.04$ is marginal \emph{if} the ceiling is $6.05$, and substantial \emph{if} the ceiling is $5.5$; you cannot tell which without the ceiling.
+
+\paragraph{The measurement.} Build the conditional pool tree (\S8) to progressively greater depth --- e.g.\ $\{10, 20, 40, 80\}$ global splits (or until the pool is exhausted / gain $\le0$) --- and, at each depth, report the calibrated path-decoder held-out log-loss (gate-checked, \S4.6) on the same split, alongside unigram, bigram, and a \textbf{trigram} baseline (matched smoothing). Plot \code{ll\_path} vs depth. The premise check already showed the path decoder \emph{improves} with depth on grown trees (best at low $s_{\min}$/many leaves); this asks whether the same holds for the pool tree and, if so, how far.
+
+\paragraph{Reading it (binding on how \S7 is pursued).}
+\begin{itemize}[nosep]
+\item \textbf{Still descending at $80$ splits} --- depth is cheap headroom the pool has not yet spent. \textbf{Push depth first} (it is free relative to refinement --- just more argmax-over-pool iterations); re-establish the ceiling at the depth where it plateaus, and only then run the \S7 ablation against \emph{that} floor.
+\item \textbf{Plateaus near $\approx6.06$} --- that value is close to what $[L\cup C]$ plus a path readout can yield; refinement (\S7) is then \emph{polishing near a ceiling}, and a mode that shaves a few hundredths is doing real work at the margin, not underperforming. Large further gains would require lever~1 (change the representation), not refinement.
+\item \textbf{Trigram beats the pool tree} --- a sharper warning: a fixed-order $n$-gram is extracting more than the tree, so the tree's conditional structure is not yet buying its keep over trivial higher-order context. Diagnose (is depth too shallow? is the pool missing the sharp parts?) before the ablation.
+\end{itemize}
+
+\paragraph{Why before, not after, the ablation.} The \S10 ablation decides which refinement mode to adopt by held-out log-loss deltas. Those deltas are only interpretable against the ceiling: without it, ``$6.06\to6.04$'' is an uninterpretable two-hundredths. With it, the same delta is either near-ceiling polishing (adopt the cheapest mode, expect little) or real headroom capture (worth the more expensive modes). One depth sweep converts every subsequent ablation row from a bare number into a judgement.
+
+%---------------------------------------------------------------------
+
+\section{Parameters}
+
+\begin{center}
+\begin{longtable}{@{}lll@{}}
+\toprule
+Param & Meaning & Default\\
+\midrule
+\endhead
+$r$ & text-window radius for $L/R$ (only place position enters) & 4\\
+$D$ & max part popcount (width cap) during growth & 256\\
+$B_{\max}$ & max candidate bits per grow step (\S3.4.3) & 512\\
+$s_{\min}$ & support floor: smaller child $\ge s_{\min}$ for a split to be eligible & 20\\
+\gfn & \code{weighted\_entropy} (default) or \code{gain\_ratio} & weighted\_entropy\\
+$g_{\text{floor}}$ & absolute raw-gain floor (nats) for gain-ratio eligibility & 1e-6\\
+$\varepsilon$ & \code{SplitInfo} clamp for gain-ratio & 1e-6\\
+$\alpha_s$ & decoder smoothing pseudocount (keep small) & 0.1\\
+$\kappa$ & support-weight pseudocount in the decoder & 50\\
+$\beta_{\text{floor}}$ & unigram-floor interpolation weight & 0.1\\
+version & \code{BERT} or \code{GPT} (sets input, target, held-out) & per run\\
+early-stop & only primary stop is $g\le0$; \code{max\_iterations}/\code{max\_leaves} optional & $g\le0$\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+
+\medskip\noindent Pool-specific parameters: $T=100$ subset trees, $K=8192$ leaves/tree, pool size $M=30{,}000$ (tunable $[10^4,5\times10^4]$), refinement margin $\delta$ and overlap threshold $\tau_{\text{ovl}}$, penalty $\rho\in[0,1]$ ($=1$ off), premise-check sweep $s_{\min}\in\{1,10,20,30,50,100\}$ and decision margin $\tau=0.02$ nats.
+
+\medskip\noindent Execution parameters (\S3.5, result-neutral --- do not change the tree, only how it is built; \S10.6 inv.~10): \code{sig\_source} $\in\{$\code{materialized}, \code{regenerate}$\}$ (default \code{materialized} when the SIG2 store fits, else \code{regenerate}); $B_{\text{pool}}$ = pool parts whose \score\ triples are held resident per streaming block (memory$\leftrightarrow$passes knob; default sized to available RAM).
+
+\section{Evaluation}
+
+\subsection{Mandatory held-out metric report (the interpretation contract)}
+\textbf{No conclusion (``no sweet spot,'' ``architecture mismatched,'' etc.) may be drawn unless all of the following are reported, on held-out cross-corpus, at every regularization/depth setting swept.} Output one row per setting:
+
+\begin{center}
+\begin{longtable}{@{}ll@{}}
+\toprule
+Column & Definition\\
+\midrule
+\endhead
+\code{setting} & the swept knob(s), e.g. $s_{\min}$ and $k$ (number of splits / depth)\\
+\code{n\_splits}, \code{n\_leaves} & tree size at this setting\\
+\code{acc\_path} & held-out top-1 accuracy of the path decoder (\S4.2)\\
+\code{acc\_leaf} & held-out top-1 accuracy of the leaf-majority readout (diagnostic)\\
+\code{logloss\_path} & held-out mean log-loss (nats) of the path decoder --- \textbf{the discriminator}\\
+\code{acc\_unigram}, \code{ll\_unigram} & unigram baseline, \emph{same smoothing} as the readout (\S4.1)\\
+\code{acc\_bigram}, \code{ll\_bigram} & bigram baseline (keyed on current word), \emph{same smoothing}\\
+\code{ll\_trigram} & trigram baseline, \emph{same smoothing} --- the headroom reference for the depth sweep (\S8.2)\\
+\code{the\_rate} & fraction of held-out predictions equal to the single most frequent word\\
+\code{beta\_pass} & the $\beta_{\text{floor}}$ at which the calibration gate (\S4.6) first passes\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\noindent\textbf{Why both accuracy and log-loss (non-negotiable).} Accuracy alone is blind to this architecture's failure mode: a decoder whose argmax sits on the majority word but whose distribution is miscalibrated yields unigram-\emph{accuracy} with worse-than-unigram \emph{log-loss} --- which looks like ``no signal'' but is a readout artifact. \textbf{Log-loss is the discriminator.} If \code{the\_rate}$\approx$ the unigram rate across all settings, the model is defaulting to the majority argmax and accuracy is measuring that floor, not the model.
+
+\paragraph{Binding interpretation rule (compare log-loss, not accuracy).}
+\begin{itemize}[nosep]
+\item \code{logloss\_path} $>$ \code{ll\_unigram} $\Rightarrow$ \textbf{decoder miscalibrated; run INVALID for conclusions}. Fix the gate (\S\ref{sec:gate}) first.
+\item \code{logloss\_path} $\le$ \code{ll\_unigram} \emph{and} \code{acc\_path} $\approx$ \code{acc\_unigram} $\Rightarrow$ \textbf{signal present, argmax not yet moved} --- a decoder/depth issue, \emph{not} an architecture verdict.
+\item \code{logloss\_path} $\approx$ \code{ll\_unigram} \emph{and} \code{acc\_path} $\approx$ \code{acc\_unigram}, \emph{after the gate passes} $\Rightarrow$ the earned ``no generalizable signal'' result.
+\end{itemize}
+\textbf{Until the decoder passes the calibration gate, no accuracy-based negative conclusion is valid.} This single rule is what prevents the recurring ``architecture is broken'' false alarm.
+
+
+\subsection{Overlap tracking (two points, one metric)}
+Overlap is the surprisal-weighted Jaccard $\ \text{ovl}(p,p')=\code{weighted\_dot}(p,p')/\code{info\_content}(p\cup p')\ $ (comparable to the reconstruction-era $0.67$ figure). Track it at:
+\begin{itemize}[nosep]
+\item \textbf{Pool health (offline, once, after prune)} --- the pairwise overlap \emph{distribution} over $\mathcal{P}$: report median, 75th/90th percentile, and the fraction of parts with overlap $>0.5$ against any other. This gates whether the capped-subset discovery actually produced lean parts: high median $\Rightarrow$ tighten subset/cap sizes before using the pool. Answers ``is the vocabulary clean?''
+\item \textbf{Selection overlap (per iteration, in the build trace)} --- overlap of the just-chosen split against the splits already placed on the current path. Low $\Rightarrow$ conditionality + remove-on-use are working; creeping up $\Rightarrow$ a problem in gain scoring or removal. Answers ``is the tree using the vocabulary cleanly?''
+\end{itemize}
+A clean pool with a badly-using build, or a clean build over a dirty pool, are different failures --- hence both.
+
+
+\subsection{The refinement ablation (the decision table)}
+Run the following configurations; each emits one row. The decision is made \emph{on these numbers}, not by argument. \code{none} is the baseline every mode must beat.
+
+\begin{center}
+\begin{longtable}{@{}ll@{}}
+\toprule
+Column & Definition\\
+\midrule
+\endhead
+\code{refine\_mode} & \code{none} / \code{mask\_core} / \code{merge\_union} / \code{flip\_delta} / $+$\code{deep} / $+$\code{penalty}($\rho$)\\
+\code{ll\_path} & \textbf{held-out log-loss} (the discriminator; must beat \code{none})\\
+\code{acc\_path} & held-out top-1 accuracy\\
+\code{the\_rate} & fraction of held-out predictions $=$ most-frequent word\\
+\code{ll\_unigram}, \code{ll\_bigram} & baselines, same smoothing\\
+\code{beta\_pass} & $\beta_{\text{floor}}$ at which the calibration gate passes\\
+\code{pool\_ovl\_med} & median pairwise pool overlap \emph{after} this mode's refinement\\
+\code{mean\_popcount} & mean bits per part after refinement (does the mode lean the parts?)\\
+\code{build\_time} & wall-clock (refinement is not free; cost must be justified by the gain)\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\paragraph{Decision rule (binding).}
+\begin{itemize}[nosep]
+\item A mode is adopted only if it \textbf{beats \code{none} on held-out log-loss} (not accuracy --- accuracy is blind to the argmax-hiding-signal failure, \S10.1).
+\item If a mode reduces \code{pool\_ovl\_med} / \code{mean\_popcount} \emph{but does not improve} \code{ll\_path}, the finding is recorded as \emph{``overlap was not the blocker''} --- a real, publishable negative result, not a reason to keep the mode.
+\item \code{used\_bit\_penalty}: adopt a $\rho<1$ only if it beats $\rho=1$ on \code{ll\_path}; if a lean pool already gives low selection-overlap, expect $\rho=1$ to win and record that.
+\item Ties broken toward the \emph{simpler / cheaper} mode (\code{none} $\prec$ \code{mask\_core} $\prec$ \code{flip\_delta} $\prec$ ${}+$\code{deep}), by \code{build\_time}.
+\end{itemize}
+
+
+\subsection{Per-iteration build trace (required)}
+The build emits a machine-readable trace (CSV/JSONL) with \emph{one row per iteration}. This is the answer to ``how do part-size, threshold, and gain evolve during iterations.'' Columns, per iteration $l$:
+
+\begin{center}
+\begin{longtable}{@{}lll@{}}
+\toprule
+Column & Symbol & Meaning\\
+\midrule
+\endhead
+\code{l} & $l$ & iteration index (1-based)\\
+\code{gain} & $g(p^*,t_p^*)$ & the winning global gain this iteration\\
+\code{popcount} & $|p^*|$ & \textbf{number of bits in the chosen part} (part-size progression)\\
+\code{t\_p} & $t_p^*$ & the chosen global threshold (operating-point progression)\\
+\code{n\_sets} & $n$ & number of sets in $S$ before this split (partition fragmentation)\\
+\code{n\_active} & --- & number of sets active-for-gain (not yet terminal)\\
+\code{frac\_sets\_split} & --- & fraction of active sets this split actually splits ($g_i>0$): \emph{concentration}\\
+\code{child\_balance\_med} & --- & median over split sets of $|S_{2i}|/|S_i|$ (near $0.5$ = balanced)\\
+\code{child\_balance\_iqr} & --- & IQR of that ratio across split sets\\
+\code{frac\_unsplittable} & --- & fraction of active sets left intact this iteration (empty-child)\\
+\code{seed\_bit} & --- & the seed bit id that started $p^*$ (reproducibility)\\
+\code{grow\_steps} & --- & how many bits \code{GROW\_PART} added before stopping ($=|p^*|$)\\
+\code{leaf\_H\_wmean} & --- & size-weighted mean leaf entropy \emph{after} this split (running)\\
+\code{heldout\_ll} & --- & (optional, every $j$ iters) held-out log-loss of the current tree\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\noindent From this single trace the following \textbf{progression series} are read directly (plot each vs $l$):
+\begin{itemize}[nosep]
+\item \textbf{Gain vs iteration} (\code{gain}): expected to \emph{typically decrease} (one $t_p$ serving increasingly heterogeneous sets), possibly rising transiently; a sharp drop / early plateau flags where useful splits run out.
+\item \textbf{Part-size vs iteration} (\code{popcount}): do splits start wide and narrow, or the reverse?
+\item \textbf{Threshold vs iteration} (\code{t\_p}): does the operating point drift (e.g.\ toward strict containment) as the tree deepens?
+\item \textbf{Set-count vs iteration} (\code{n\_sets}): how fast the partition fragments; can plateau when most sets are terminal.
+\item \textbf{Concentration / balance} (\code{frac\_sets\_split}, \code{child\_balance\_med}): does the global split fire in a few sets or across many, and are children balanced?
+\item \textbf{Leaf-entropy vs iteration} (\code{leaf\_H\_wmean}): the running label-entropy reduction --- the ``did we learn to predict'' curve; contrast with \code{heldout\_ll} to see overfitting (train entropy falling while held-out flattens = stop).
+\end{itemize}
+
+
+\subsection{Top-parts report (required)}
+After building, emit a report of the \textbf{top-$K$ splits by gain} (default $K=20$; also always include the first $\min(10,\text{depth})$ splits in tree order, since early splits shape everything below). \emph{One entry per split}, with:
+
+\begin{center}
+\begin{longtable}{@{}ll@{}}
+\toprule
+Field & Meaning\\
+\midrule
+\endhead
+\code{rank}, \code{iter\_l} & rank by gain, and the iteration it was chosen\\
+\code{gain} & the split's global gain $g(p^*,t_p^*)$\\
+\code{popcount}, \code{t\_p} & size of the part and its threshold\\
+\code{pieces} & \textbf{the part decoded back to its subword pieces} --- the human-readable bit-list;\\
+ & for BERT annotate each piece with its band ($L$ or $R$); with surprisal weight $w_e$\\
+\code{n\_fire}, \code{n\_not} & total samples on each branch (summed across sets)\\
+\code{top\_words\_fire} & top-10 words in the FIRE child's label histogram, with probabilities\\
+\code{top\_words\_not} & top-10 words in the NOT-FIRE child's histogram, with probabilities\\
+\code{delta\_vs\_prior} & KL$(P_{\text{fire}}\Vert P)$ and KL$(P_{\text{not}}\Vert P)$ --- how far each child moved from unigram\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\noindent\textbf{Purpose (qualitative, a debugging aid --- not an automated pass/fail).} Inspect whether early splits are interpretable (function-word frames, current-word gates) and whether later splits become \emph{conditionally} specific (sharp only within a subtree). \code{delta\_vs\_prior} is the quantitative companion: a split whose children barely move from the prior (small KL) is near-useless regardless of its gain rank, and a top split with large child-KL but small \code{top\_words} shift toward the truth is the signature of ``moves probability mass but not the argmax'' --- exactly the case \S10.1's log-loss column exists to catch.
+
+
+\subsection{Algorithm invariants (unit tests)}
+\begin{enumerate}[nosep]
+\item \textbf{Empty-child:} a $(p,t_p)$ firing on all/none of $S_i$ yields $g_i=0$ and keeps $S_i$ intact; assert no empty set is created.
+\item \textbf{Shaving $\approx0$:} carving one pure element off a large impure set scores $g_i\approx0$ under weighted-entropy reduction.
+\item \textbf{No small-parent bias:} $g$ is the absolute weighted sum; assert it is not divided by set count/size.
+\item \textbf{Gain-ratio guard:} the ratio applies only to above-mean-raw-gain splits with clamped \code{SplitInfo}; a maximally-lopsided split cannot win by divide-by-near-zero.
+\item \textbf{Joint sweep correctness:} $g(p,t)$ from the incremental sweep equals a brute-force recompute at each breakpoint; \cont{} computed once per part. \emph{The blocked / external-sorted streaming sweep (\S3.5) yields byte-identical $(t_p^*,g^*)$ to the in-memory sweep.}
+\item \textbf{Global split:} the chosen $(p,t_p)$ is applied identically to every set (one part+threshold per iteration).
+\item \textbf{Pluggable gain:} the macro runs with either \gfn{}; both produce valid trees.
+\item \textbf{Determinism:} fixed input $\Rightarrow$ identical tree (tie-break popcount $\to$ bit-list $\to$ larger $t_p$); serialization in ascending word-id order.
+\item \textbf{Trace + report present:} \S10.4 trace and \S10.5 report are emitted every run.
+\item \textbf{Streaming equivalence (Option~1):} the external-memory build (blocked/external-sorted \score, replayed or cached set-membership, per-iteration gain/histogram reduction; \S3.5) produces a \emph{byte-identical} tree and histograms to a single-process in-memory build on the same data and frozen artifacts (\S2.1). Determinism holds under the \S3.4.4 total order.
+\end{enumerate}
+
+
+\section{Scope, resolved decisions, and the gate}
+
+Not reconstruction; not order-aware (bags discard order; positions enter only via $r$); conditionality lives in the tree, not deferred; no atomic-completion / coverage-floor / set-cover / AdaBoost / BMF (reconstruction-era, removed); \textbf{stacking is out of scope} (a later spec may re-run \S3 on leaf-path codes; no code should assume a multi-layer artifact).
+
+%=====================================================================
+
+
+
+
+\textbf{Resolved (locked, no longer open):}
+\begin{enumerate}[nosep]
+\item \textbf{Discovery-tree type:} per-node CART (\S6.1) --- clean $K$-leaf cap, leaner/more-local parts, lower overlap at source. Discovery (CART) and final tree (global-split) intentionally differ; discovery produces a bit-pattern vocabulary, the final tree re-scores globally.
+\item \textbf{Leaf cap $K$:} default $8192$, a shared option across the premise check (\S5) and discovery (\S6).
+\item \textbf{Pool / subset sizes:} $T=100$ bootstrap subset trees, raw pool $\approx8.2\times10^5$, pruned to $M=30{,}000$ by cross-tree frequency (tunable in $[10^4,5\!\times\!10^4]$; \S6.2).
+\item \textbf{Execution model:} external-memory / streamed build (Option~1) --- only the split list and node histograms persist; set-membership is replayed, signatures streamed or regenerated under frozen artifacts (\S2.1, \S3.5). \emph{Exact}, not approximate: byte-identical to an in-memory build (\S10.6, inv.~10). A binned-threshold approximation is explicitly deferred until profiling shows the exact sort is the bottleneck, and would then be gated by the doc's own measure-first discipline.
+\end{enumerate}
+\textbf{The one gate (not optional):} the premise check (\S5) must return verdict \emph{H\textsubscript{overfit} confirmed} --- a capped, regularized CART tree with honest leaf-readout beating unigram held-out log-loss by margin $\tau=0.02$ nats --- \textbf{before any of \S6--\S10 is built}. If it returns H\textsubscript{leaf-weak} (rule 2a), the leaf-only pool does not apply as written --- keep the path decoder or change the representation; if H\textsubscript{signal-poor} (rule 2b, confirmed by the path decoder \emph{also} failing the gate), the representation, not the search, is the thing to change.
+
+
+\end{document}

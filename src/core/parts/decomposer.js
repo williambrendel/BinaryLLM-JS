@@ -16,8 +16,8 @@
  * registered Start/End/Mid candidate substring, order them by `(dict ID, pos)`,
  * then greedily claim non-overlapping ranges — at most one Start and one End,
  * while Mid may fire repeatedly. Any position still uncovered is filled with a
- * positional Letter singleton whose spelling encodes where it sits:
- * `"x##"` (start), `"##y##"` (mid), or `"##z"` (end).
+ * length-1 fragment atom whose kind encodes where it sits: `Start "x"`,
+ * `Mid "y"`, or `End "z"` (bare value — no `##` markers).
  *
  * All strings are byte-strings (see `byteString.js`).
  *
@@ -30,35 +30,32 @@
  * @see {@link findSingletonRuns}
  */
 
-import { Kind, kMinPartLength, kMaxPartLength, kInvalidPartId } from "./kind.js";
+import { Kind, kMinPartLength, kMaxPartLength, kInvalidPartId, positionalKind } from "./kind.js";
 
-// ---- Letter singleton (## position marker) -------------------------------
+// ---- Single-char fragment fill (length-1 Start/Mid/End atom) --------------
 /**
  * @function emitLetter
- * @description Looks up the Letter-singleton part ID for a single character `c`,
- * choosing the spelling that encodes where the character sits within its word.
- * The `##` sigil marks the truncated side(s): `"##c"` for an end-only position,
- * `"##c##"` for a mid position, and `"c##"` for a start position. When both
- * `atStart` and `atEnd` are set (a lone character), the start encoding is used.
+ * @description Looks up the length-1 fragment part ID for a single character `c`,
+ * choosing the kind that encodes where the character sits within its word:
+ * {@link Kind.Start} at the word start, {@link Kind.End} at the word end,
+ * {@link Kind.Mid} in the interior. When both `atStart` and `atEnd` are set (a
+ * lone character), the Start kind is used (start-wins, via {@link positionalKind}).
+ * The value looked up is the bare character — there is no `##`-marked "letter".
  *
  * @param {import("./dictionary.js").PartDictionary} dict
- *   Part dictionary used to look up the Letter entry.
+ *   Part dictionary used to look up the fragment entry.
  * @param {string} c - The single character (byte) to encode.
  * @param {boolean} atStart - Whether the character sits at the word's start.
  * @param {boolean} atEnd - Whether the character sits at the word's end.
- * @returns {number} The Letter part ID, or `kInvalidPartId` if unregistered.
+ * @returns {number} The fragment part ID, or `kInvalidPartId` if unregistered.
  *
  * @example
- * emitLetter(dict, "y", false, false)  // → dict.lookup(Kind.Letter, "##y##")
- * emitLetter(dict, "x", true,  false)  // → dict.lookup(Kind.Letter, "x##")
- * emitLetter(dict, "z", false, true)   // → dict.lookup(Kind.Letter, "##z")
+ * emitLetter(dict, "y", false, false)  // → dict.lookup(Kind.Mid, "y")
+ * emitLetter(dict, "x", true,  false)  // → dict.lookup(Kind.Start, "x")
+ * emitLetter(dict, "z", false, true)   // → dict.lookup(Kind.End, "z")
  */
 const emitLetter = (dict, c, atStart, atEnd) => {
-  let s;
-  if (atEnd && !atStart) s = "##" + c;
-  else if (!atStart && !atEnd) s = "##" + c + "##";
-  else s = c + "##"; // atStart (with or without atEnd) defaults to start encoding
-  return dict.lookup(Kind.Letter, s);
+  return dict.lookup(positionalKind(atStart, atEnd), c);
 };
 
 // ---- Candidate enumeration -----------------------------------------------
@@ -85,7 +82,7 @@ const emitLetter = (dict, c, atStart, atEnd) => {
  *   One record per registered candidate: `pos` is the inclusive start offset,
  *   `L` the length, `kind` the {@link Kind}, and `id` the resolved part ID.
  */
-const enumerateCandidates = (dict, word) => {
+export const enumerateCandidates = (dict, word) => {
   const n = word.length;
   const out = [];
   for (let L = kMinPartLength; L <= kMaxPartLength; L++) {
@@ -165,7 +162,7 @@ const claimRange = (claimed, begin, end) => {
  * / `hasEndClaim`), whereas Mid candidates may fire any number of times.
  * Candidates that overlap an already-claimed span, or that would exceed the
  * single-Start / single-End budget, are skipped. Positions left uncovered are
- * not filled here — the callers turn them into Letter singletons or runs.
+ * not filled here — the callers turn them into length-1 fragment atoms or runs.
  *
  * @param {number} n - Length of the word being decomposed.
  * @param {Array<{pos: number, L: number, kind: number, id: number}>} candidates
@@ -200,11 +197,11 @@ const peel = (n, candidates) => {
  *
  * If the word is registered as a Whole entry, it takes the fast path and returns
  * that single ID. Otherwise the greedy peel claims the best Start/End/Mid
- * candidates and every remaining position is filled with a positional Letter
- * singleton, so the returned sequence always covers the whole word.
+ * candidates and every remaining position is filled with a length-1 fragment
+ * atom, so the returned sequence always covers the whole word.
  *
  * @param {import("./dictionary.js").PartDictionary} dict
- *   Part dictionary used to look up candidate substrings and Letter singletons.
+ *   Part dictionary used to look up candidate substrings and length-1 fragments.
  * @param {string} word - The word to decompose, as a byte-string.
  * @returns {number[]} Part IDs in left-to-right order. Empty for an empty word.
  *
@@ -213,11 +210,11 @@ const peel = (n, candidates) => {
  * decomposeWord(dict, "the")   // → [<Whole id for "the">]  (single id)
  *
  * @example
- * // No candidates: every position falls back to a positional Letter singleton.
+ * // No candidates: every position falls back to a length-1 fragment atom.
  * decomposeWord(dict, "xyz")
- * // → [ dict.lookup(Kind.Letter, "x##"),    // start
- * //     dict.lookup(Kind.Letter, "##y##"),  // mid
- * //     dict.lookup(Kind.Letter, "##z") ]   // end
+ * // → [ dict.lookup(Kind.Start, "x"),   // start
+ * //     dict.lookup(Kind.Mid, "y"),     // mid
+ * //     dict.lookup(Kind.End, "z") ]    // end
  */
 export const decomposeWord = (dict, word) => {
   const n = word.length;
@@ -233,7 +230,7 @@ export const decomposeWord = (dict, word) => {
   sortCandidatesById(cands);
   const pr = peel(n, cands);
 
-  // Letter singleton fill.
+  // Single-char fragment fill (length-1 Start/Mid/End atom).
   for (let p = 0; p < n; p++) {
     if (pr.claimed[p]) continue;
     const atStart = p === 0 && !pr.hasStartClaim;
@@ -248,7 +245,7 @@ export const decomposeWord = (dict, word) => {
 
 /**
  * @function findSingletonRuns
- * @description Returns the contiguous uncovered (Letter-singleton) ranges left
+ * @description Returns the contiguous uncovered (fragment-fill) ranges left
  * behind by the same peel that {@link decomposeWord} uses — consumed by the
  * extractor's peel loop. Each run's `start` is inclusive and `end` is exclusive.
  *

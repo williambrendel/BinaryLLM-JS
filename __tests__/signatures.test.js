@@ -31,7 +31,7 @@ import {
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 const dict = loadDictText(fs.readFileSync(path.join(FIX, "small_gold_dict.txt"), "latin1"));
-const F = dict.size(); // 509 for this fixture
+const F = dict.size(); // 519 for this fixture
 
 // First-occurrence signature (a [L, C, R] band list) for a word in a sentence.
 const sigFor = (sentence, word) => {
@@ -47,8 +47,8 @@ const sigFor = (sentence, word) => {
 };
 
 describe("encoder band element type (keyed on F, see utilities/sparseArrayType)", () => {
-  test("bands are Uint16Array for this fixture (F=509)", () => {
-    expect(F).toBe(509);
+  test("bands are Uint16Array for this fixture (F=519)", () => {
+    expect(F).toBe(519);
     const sig = encode(dict, tokenizeStream("the peppers"))[1];
     expect(sig).toHaveLength(3);
     for (const band of sig) expect(band).toBeInstanceOf(Uint16Array);
@@ -71,7 +71,7 @@ describe("encode (3F) — parity with debug_decompose", () => {
     expect(Array.from(R)).toEqual([7, 9]); // were(9) ∪ pickled(7)
     // Global-indexed flat matches the oracle's 3F bits exactly.
     expect(Array.from(flatten(sigFor("the peppers were pickled", "peppers"), F))).toEqual([
-      0, 510, 1025, 1027,
+      0, 520, 1045, 1047,
     ]);
   });
 
@@ -124,7 +124,7 @@ describe("encodeWindowed", () => {
 });
 
 describe("band selectors + flatten", () => {
-  // peppers: L={0}, C={1}, R={7,9}; F=509.
+  // peppers: L={0}, C={1}, R={7,9}; F=519.
   const sig = [Uint16Array.from([0]), Uint16Array.from([1]), Uint16Array.from([7, 9])];
 
   test("selectors return banded signatures (TypedArray[])", () => {
@@ -135,9 +135,9 @@ describe("band selectors + flatten", () => {
   });
 
   test("flatten concatenates with band k shifted by k*F", () => {
-    expect(Array.from(flatten(lcr(sig), F))).toEqual([0, 510, 1025, 1027]); // [L|C|R]
-    expect(Array.from(flatten(lr(sig), F))).toEqual([0, 516, 518]); // [L | R]
-    expect(Array.from(flatten(lc(sig), F))).toEqual([0, 510]); // [L | C]
+    expect(Array.from(flatten(lcr(sig), F))).toEqual([0, 520, 1045, 1047]); // [L|C|R]
+    expect(Array.from(flatten(lr(sig), F))).toEqual([0, 526, 528]); // [L | R]
+    expect(Array.from(flatten(lc(sig), F))).toEqual([0, 520]); // [L | C]
     expect(Array.from(flatten(lUnionC(sig, F), F))).toEqual([0, 1]); // [L ∪ C]
   });
 

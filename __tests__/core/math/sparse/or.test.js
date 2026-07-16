@@ -39,6 +39,14 @@ describe("sparse/or", () => {
     expect(arr(out)).toEqual([1, 2, 3]);
   });
 
+  test("handles a 0 element (0 is a valid part id) — regression", () => {
+    expect(arr(or([0, 5], [3, 7]))).toEqual([0, 3, 5, 7]);
+    expect(arr(or([0, 1, 2], [3]))).toEqual([0, 1, 2, 3]);
+    expect(arr(or([0], [0]))).toEqual([0]);
+    expect(arr(or([0, 2, 4], [1, 3]))).toEqual([0, 1, 2, 3, 4]);
+    expect(arr(or([3, 7], [0, 5]))).toEqual([0, 3, 5, 7]);
+  });
+
   test("default export equals the named export", () => {
     expect(or).toBe(orNamed);
   });

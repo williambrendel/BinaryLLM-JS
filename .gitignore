@@ -11,3 +11,7 @@
 
 # claude setup
 .claude/
+
+# large / regenerable data (corpus splits, binary signature dumps) — not for git (exceed GitHub limits)
+data/corpora/wiki*.txt
+data/signatures/*.bin

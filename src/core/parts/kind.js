@@ -29,25 +29,32 @@
  * @readonly
  * @description Position role of a part. Numeric values match the C++
  * `enum class Kind`:
- * - `Start` — anchored to word start: `"un"`, `"re"`, `"trans"`.
- * - `End` — anchored to word end: `"ing"`, `"ed"`, `"tion"`.
- * - `Mid` — appears in word interior: `"port"`, `"graph"`, `"rate"`.
- * - `Letter` — positional letter singleton: `"a##"`, `"##a##"`, `"##a"`.
- * - `Whole` — short whole-word atom: `"the"`, `"am"`, `"i"` (lowercased).
+ * - `Start` — anchored to word start: `"un"`, `"re"`, `"trans"`, and single
+ *   chars at the word start (`"c"`).
+ * - `End` — anchored to word end: `"ing"`, `"ed"`, `"tion"`, and single chars at
+ *   the word end (`"t"`).
+ * - `Mid` — appears in word interior: `"port"`, `"graph"`, `"rate"`, and interior
+ *   single chars (`"a"`).
+ * - `Whole` — a whole word, including single-letter words: `"the"`, `"am"`,
+ *   `"i"`, `"a"` (lowercased).
  * - `Delimiter` — punctuation or whitespace token, kept literally.
+ *
+ * There is no separate "letter" kind: a single character is simply a length-1
+ * `Start`/`Mid`/`End` fragment (or a `Whole` when it is the word). Position is
+ * carried by the kind, not by `##` markers baked into the value — the `##`
+ * convention exists only in the serialized text form.
  *
  * @example
  * Kind.Start        // → 0
- * Kind.Delimiter    // → 5
+ * Kind.Delimiter    // → 4
  * kindToString(Kind.Mid)   // → "mid"
  */
 export const Kind = Object.freeze({
-  Start: 0, // anchored to word start: "un", "re", "trans"
-  End: 1, // anchored to word end: "ing", "ed", "tion"
-  Mid: 2, // appears in word interior: "port", "graph", "rate"
-  Letter: 3, // positional letter singleton: "a##", "##a##", "##a"
-  Whole: 4, // short whole-word atom: "the", "am", "i" (lowercased)
-  Delimiter: 5, // punctuation or whitespace token, kept literally
+  Start: 0, // anchored to word start: "un", "re", "trans", "c"
+  End: 1, // anchored to word end: "ing", "ed", "tion", "t"
+  Mid: 2, // appears in word interior: "port", "graph", "rate", "a"
+  Whole: 3, // a whole word incl. single letters: "the", "am", "i", "a" (lowercased)
+  Delimiter: 4, // punctuation or whitespace token, kept literally
 });
 
 /**
@@ -55,8 +62,8 @@ export const Kind = Object.freeze({
  * @description Minimum (inclusive) length for Start/Mid/End enumeration and
  * matching. The extractor generates candidates at every `L` in
  * `[kMinPartLength, kMaxPartLength]` and the decomposer searches the same
- * range — these MUST stay in sync. Length 1 is reserved for the positional
- * Letter singleton path (the coverage backstop).
+ * range — these MUST stay in sync. Length 1 is handled by the seeded single-char
+ * `Start`/`Mid`/`End` atoms (the coverage backstop), not by learned enumeration.
  *
  * @example
  * for (let L = kMinPartLength; L <= kMaxPartLength; L++) {
@@ -90,7 +97,6 @@ const KIND_TO_STRING = Object.freeze({
   [Kind.Start]: "start",
   [Kind.End]: "end",
   [Kind.Mid]: "mid",
-  [Kind.Letter]: "letter",
   [Kind.Whole]: "whole",
   [Kind.Delimiter]: "delim",
 });
@@ -99,10 +105,30 @@ const STRING_TO_KIND = Object.freeze({
   start: Kind.Start,
   end: Kind.End,
   mid: Kind.Mid,
-  letter: Kind.Letter,
   whole: Kind.Whole,
   delim: Kind.Delimiter,
 });
+
+/**
+ * @function positionalKind
+ * @description Maps a word-boundary position to the fragment {@link Kind} for a
+ * substring (typically a single character): word-start → `Start`, word-end →
+ * `End`, interior → `Mid`. A lone fragment that is both start and end (`atStart
+ * && atEnd`) resolves to `Start` — the "start-wins" convention shared by the
+ * decomposer's fill and the BPE peel's leftover-char fill.
+ *
+ * @param {boolean} atStart - The fragment sits at the word start.
+ * @param {boolean} atEnd - The fragment sits at the word end.
+ * @returns {number} `Kind.Start`, `Kind.Mid`, or `Kind.End`.
+ *
+ * @example
+ * positionalKind(true, false)   // → Kind.Start
+ * positionalKind(false, false)  // → Kind.Mid
+ * positionalKind(false, true)   // → Kind.End
+ * positionalKind(true, true)    // → Kind.Start  (lone char, start-wins)
+ */
+export const positionalKind = (atStart, atEnd) =>
+  atEnd && !atStart ? Kind.End : !atStart && !atEnd ? Kind.Mid : Kind.Start;
 
 /**
  * @function kindToString
@@ -125,7 +151,7 @@ export const kindToString = (kind) => KIND_TO_STRING[kind] ?? "?";
  * {@link kindToString}.
  *
  * @param {string} s - A lowercase kind string (`"start"`, `"end"`, `"mid"`,
- *   `"letter"`, `"whole"`, `"delim"`).
+ *   `"whole"`, `"delim"`).
  * @returns {number|undefined} The {@link Kind}, or `undefined` if unrecognized.
  *
  * @example

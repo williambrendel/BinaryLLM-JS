@@ -66,15 +66,16 @@ const unionRange = (bags, lo, hi) => {
   return acc;
 };
 
-// Shared setup: the Option B bags (local id arrays) for the Word tokens in
-// [start,end).
-const prepare = (dict, tokens, start, end) => {
+// Shared setup: the per-word bags (local id arrays) for the Word tokens in
+// [start,end). `bagOf` selects the word encoding (sparse `encodeWord` default,
+// or `fuzzyEncodeWord` for the dense all-candidates bag).
+const prepare = (dict, tokens, start, end, bagOf) => {
   const n = tokens.length;
   if (end > n) end = n;
   const bags = [];
   for (let i = start; i < end; i++) {
     if (tokens[i].type === StreamTokenType.Word) {
-      bags.push(encodeWord(dict, asciiLowercase(tokens[i].value)));
+      bags.push(bagOf(dict, asciiLowercase(tokens[i].value)));
     }
   }
   return bags;
@@ -89,9 +90,9 @@ const prepare = (dict, tokens, start, end) => {
  * @param {number} [end=Infinity] clamped to tokens.length.
  * @returns {Signature[]} one [L, C, R] signature per Word token.
  */
-export const encode = (dict, tokens, start = 0, end = Infinity) => {
+export const encode = (dict, tokens, start = 0, end = Infinity, bagOf = encodeWord) => {
   const Arr = sparseArrayType(dict.size());
-  const current = prepare(dict, tokens, start, end);
+  const current = prepare(dict, tokens, start, end, bagOf);
   const N = current.length;
   const out = new Array(N);
   if (N === 0) return out;
@@ -122,9 +123,9 @@ export const encode = (dict, tokens, start = 0, end = Infinity) => {
  * @param {number} [end=Infinity] clamped to tokens.length.
  * @returns {Signature[]} one [L, C, R] signature per Word token.
  */
-export const encodeWindowed = (dict, tokens, radius, start = 0, end = Infinity) => {
+export const encodeWindowed = (dict, tokens, radius, start = 0, end = Infinity, bagOf = encodeWord) => {
   const Arr = sparseArrayType(dict.size());
-  const current = prepare(dict, tokens, start, end);
+  const current = prepare(dict, tokens, start, end, bagOf);
   const N = current.length;
   const out = new Array(N);
   for (let i = 0; i < N; i++) {
@@ -135,6 +136,38 @@ export const encodeWindowed = (dict, tokens, radius, start = 0, end = Infinity) 
       Arr.from(current[i]),
       Arr.from(unionRange(current, i + 1, hi)),
     ];
+  }
+  return out;
+};
+
+/**
+ * Encode Word tokens into POSITION-PRESERVING signatures: instead of OR-pooling a
+ * window into one F-wide bag (which makes every bit fire diffusely), each offset
+ * keeps its own subspace — the word at −o contributes bits shifted by `(o−1)·F`.
+ * So a bit stays sparse and position-specific ("piece X at offset −2") across a
+ * wide window, keeping peels expressible where pooling would only allow bisects.
+ *
+ *   L: word@−o → bits + (o−1)·F      (o = 1…radius)   → [0, r·F)
+ *   C: current word → bits + r·F                       → [r·F, (r+1)·F)
+ *   R: word@+o → bits + (r+o)·F      (o = 1…radius)   → [(r+1)·F, (2r+1)·F)
+ *
+ * Bands land in disjoint id ranges, so `L∪C` / `[L|R]` compose without collision.
+ * @returns {Signature[]} one [L, C, R] positional signature per Word token.
+ */
+export const encodePositional = (dict, tokens, radius, start = 0, end = Infinity, bagOf = encodeWord) => {
+  const F = dict.size();
+  const Arr = sparseArrayType((2 * radius + 1) * F);
+  const current = prepare(dict, tokens, start, end, bagOf);
+  const N = current.length;
+  const out = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const L = [];
+    for (let o = 1; o <= radius && i - o >= 0; o++) { const off = (o - 1) * F; for (const b of current[i - o]) L.push(b + off); }
+    const C = []; { const off = radius * F; for (const b of current[i]) C.push(b + off); }
+    const R = [];
+    for (let o = 1; o <= radius && i + o < N; o++) { const off = (radius + o) * F; for (const b of current[i + o]) R.push(b + off); }
+    L.sort((a, b) => a - b); R.sort((a, b) => a - b);
+    out[i] = [Arr.from(L), Arr.from(C), Arr.from(R)];
   }
   return out;
 };

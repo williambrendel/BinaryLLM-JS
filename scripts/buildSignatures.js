@@ -34,6 +34,7 @@ import { fileURLToPath } from "node:url";
 import { tokenizeStream, StreamTokenType } from "../src/core/parts/tokenize.js";
 import { loadDictText, loadDictBinary } from "../src/core/parts/dictionary.js";
 import { encode, encodeWindowed } from "../src/core/signatures/encoder.js";
+import { encodeWord, fuzzyEncodeWord } from "../src/core/signatures/wordEncoder.js";
 import { writeDataset, NO_LABEL } from "../src/core/signatures/signatureDataset.js";
 import { segmentText } from "../src/utilities/textSegmentation/segmentText.js";
 import { segmentTextSections } from "../src/utilities/textSegmentation/segmentTextSections.js";
@@ -77,12 +78,15 @@ const main = () => {
   const positional = [];
   let scale = "both";
   let radius = null;
+  let fuzzy = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--scale") scale = args[++i];
     else if (a === "--radius") radius = parseInt(args[++i], 10);
+    else if (a === "--fuzzy") fuzzy = true;
     else positional.push(a);
   }
+  const bagOf = fuzzy ? fuzzyEncodeWord : encodeWord;
   if (positional.length < 3) {
     usage();
     process.exit(2);
@@ -115,7 +119,7 @@ const main = () => {
     const toks = tokenizeStream(text);
     const words = toks.filter((t) => t.type === StreamTokenType.Word).map((t) => t.value);
     if (words.length === 0) return;
-    const sigs = radius === null ? encode(dict, toks) : encodeWindowed(dict, toks, radius);
+    const sigs = radius === null ? encode(dict, toks, 0, Infinity, bagOf) : encodeWindowed(dict, toks, radius, 0, Infinity, bagOf);
     for (let i = 0; i < sigs.length; i++) {
       const [L, C, R] = sigs[i];
       records.push({
@@ -154,7 +158,7 @@ const main = () => {
   process.stderr.write(`scopes: ${counts.sentence} sentence, ${counts.paragraph} paragraph\n`);
   process.stderr.write(
     `dataset: N=${counts.records} records, F=${F}, V=${vocab.length}` +
-      `, bands=[L,C,R], scale=${scale}${radius === null ? "" : `, radius=${radius}`} -> ${outPath}\n`,
+      `, bands=[L,C,R], scale=${scale}${radius === null ? "" : `, radius=${radius}`}${fuzzy ? ", fuzzy" : ""} -> ${outPath}\n`,
   );
 };
 

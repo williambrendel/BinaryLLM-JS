@@ -31,10 +31,16 @@ describe("tokenize", () => {
     expect(asciiLowercase("AbC123")).toBe("abc123");
   });
 
-  test("keeps in-word connectors", () => {
-    expect(words("don't stop")).toEqual(["don't", "stop"]);
-    expect(words("rock'n'roll")).toEqual(["rock'n'roll"]);
+  test("keeps hyphen and numeric connectors in-word", () => {
+    expect(words("co-op")).toEqual(["co-op"]);
     expect(words("2,4-d")).toEqual(["2,4-d"]);
+  });
+
+  test("apostrophe and ampersand split off as delimiters", () => {
+    expect(words("don't stop")).toEqual(["don", "t", "stop"]);
+    expect(words("rock'n'roll")).toEqual(["rock", "n", "roll"]);
+    expect(words("at&t")).toEqual(["at", "t"]);
+    expect(delims("don't")).toEqual(["'"]);
   });
 
   test("decimal vs operator", () => {
@@ -62,8 +68,8 @@ describe("tokenize", () => {
     expect(delims("a  b")).toEqual(["\t"]); // 2 spaces -> indent class
   });
 
-  test("trailing-apostrophe absorption depends on quote state", () => {
-    // Outside a quote, mothers' keeps the trailing apostrophe.
-    expect(words("mothers' day")).toEqual(["mothers'", "day"]);
+  test("trailing apostrophe splits off as a delimiter", () => {
+    expect(words("mothers' day")).toEqual(["mothers", "day"]);
+    expect(delims("mothers'")).toEqual(["'"]);
   });
 });

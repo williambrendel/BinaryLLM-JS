@@ -53,7 +53,7 @@ export const and = (a, b, out) => {
   while (i < alen && j < blen) {
     (ai = a[i]) < (bj = b[j]) && ++i
     || (ai > bj && ++j)
-    || (++i, ++j, out[k++] = ai);
+    || (out[k++] = ai, ++i, ++j);
   }
 
   return out.subarray(0, k);

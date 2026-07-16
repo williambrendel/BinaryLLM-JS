@@ -52,8 +52,6 @@ const LF = 10;
 const CR = 13;
 const SP = 32;
 const DOLLAR = 36; // $
-const AMP = 38; // &
-const APOS = 39; // '
 const PLUS = 43; // +
 const COMMA = 44; // ,
 const DASH = 45; // -
@@ -267,14 +265,13 @@ const classifyPunctuationRun = (run) => {
 /**
  * @function tokenizeStream
  * @description Tokenize raw text into `Word` / `Delimiter` tokens in stream
- * order. Word runs may include in-word connectors (`-`, `&`, `'`, `,`, `.`)
- * and a leading `[+-]?\$?` number prefix; whitespace and punctuation runs are
- * collapsed into normalized delimiter values.
- *
- * See `tokenize.cpp` for the full rule set: `-`/`&`/`'`/`,`/`.` in-word
- * connectors, acronym and decimal handling, leading `[+-]?\$?` number
- * prefixes, and whitespace/punctuation run normalization. Each token's
- * `type` is a {@link StreamTokenType} value and its `value` is a byte-string.
+ * order. The hyphen (`-`) is the only in-word letter connector; word runs also
+ * keep in-number `,`/`.` (thousands and decimals), acronym dots (`U.S.A`), and
+ * a leading `[+-]?\$?` number prefix. The apostrophe (`'`) and ampersand (`&`)
+ * are NOT connectors — they split off as their own delimiter tokens.
+ * Whitespace and punctuation runs are collapsed into normalized delimiter
+ * values. Each token's `type` is a {@link StreamTokenType} value and its
+ * `value` is a byte-string.
  *
  * @param {string|Uint8Array} raw - UTF-8 text or raw bytes to tokenize.
  * @returns {Array<{type: number, value: string}>} Tokens in stream order;
@@ -304,7 +301,6 @@ export const tokenizeStream = (raw) => {
   if (n === 0) return out;
 
   let i = 0;
-  let inQuote = false;
 
   while (i < n) {
     const startC = s.charCodeAt(i);
@@ -323,21 +319,12 @@ export const tokenizeStream = (raw) => {
           j++;
           continue;
         }
-        if (c === DASH || c === AMP) {
+        // Hyphen is an in-word connector between two word chars ("co-op").
+        // The apostrophe and ampersand are NOT: they split off as delimiters.
+        if (c === DASH) {
           if (hasRight && isWordChar(right)) {
             j++;
             continue;
-          }
-          break;
-        }
-        if (c === APOS) {
-          if (hasRight && isWordChar(right)) {
-            j++;
-            continue;
-          }
-          if (!inQuote) {
-            j++;
-            break;
           }
           break;
         }
@@ -395,9 +382,6 @@ export const tokenizeStream = (raw) => {
         out.push({ type: StreamTokenType.Delimiter, value: classifyWhitespaceRun(run) });
       } else {
         out.push({ type: StreamTokenType.Delimiter, value: classifyPunctuationRun(run) });
-        for (let k = 0; k < run.length; k++) {
-          if (run.charCodeAt(k) === APOS) inQuote = !inQuote;
-        }
       }
       i = j;
     }

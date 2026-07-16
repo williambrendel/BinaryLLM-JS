@@ -46,13 +46,17 @@ export const xor = (a, b, out) => {
     || new Uint16Array(n)
   );
   
+  // NB: the emitting branches end their comma-sequence on `++i`/`++j` (always
+  // truthy), NOT on `out[k++]=v` — v can be 0 (part id 0 is the first dict
+  // entry) and a falsy result would fall through to the next `||` and
+  // double-process. Ordering the increment last keeps the `&&`/`||` chain sound.
   while (i < alen && j < blen) {
     (ai = a[i]) < (bj = b[j]) && (
-      ++i, out[k++] = ai
+      out[k++] = ai, ++i
     ) || (
       ai > bj && (
-        ++j,
-        out[k++] = bj
+        out[k++] = bj,
+        ++j
       )
     ) || (++i, ++j);
   }

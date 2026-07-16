@@ -12,25 +12,35 @@ import {
   Kind,
   kindToString,
   parseKind,
+  positionalKind,
   kMinPartLength,
   kMaxPartLength,
   kInvalidPartId,
 } from "../../../src/core/parts/kind.js";
 
 describe("kind — Kind enum", () => {
-  test("numeric values match the C++ enum", () => {
+  test("four content kinds plus the delimiter exception (no separate Letter)", () => {
     expect(Kind).toEqual({
       Start: 0,
       End: 1,
       Mid: 2,
-      Letter: 3,
-      Whole: 4,
-      Delimiter: 5,
+      Whole: 3,
+      Delimiter: 4,
     });
+    expect(Kind.Letter).toBeUndefined();
   });
 
   test("the enum object is frozen", () => {
     expect(Object.isFrozen(Kind)).toBe(true);
+  });
+});
+
+describe("kind — positionalKind", () => {
+  test("maps boundary position to the length-1 fragment kind (start-wins for a lone char)", () => {
+    expect(positionalKind(true, false)).toBe(Kind.Start);
+    expect(positionalKind(false, false)).toBe(Kind.Mid);
+    expect(positionalKind(false, true)).toBe(Kind.End);
+    expect(positionalKind(true, true)).toBe(Kind.Start);
   });
 });
 
@@ -39,7 +49,6 @@ describe("kind — kindToString / parseKind", () => {
     [Kind.Start, "start"],
     [Kind.End, "end"],
     [Kind.Mid, "mid"],
-    [Kind.Letter, "letter"],
     [Kind.Whole, "whole"],
     [Kind.Delimiter, "delim"],
   ];

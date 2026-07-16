@@ -50,15 +50,20 @@ describe("PartDictionary", () => {
   test("augmentWithAtoms regenerates singletons/specials", () => {
     const d = new PartDictionary();
     augmentWithAtoms(d);
-    expect(d.lookup(Kind.Letter, "a##")).not.toBe(kInvalidPartId);
-    expect(d.lookup(Kind.Letter, "##a##")).not.toBe(kInvalidPartId);
-    expect(d.lookup(Kind.Letter, "##a")).not.toBe(kInvalidPartId);
+    // Single chars are length-1 Start/Mid/End fragments (bare value), not a
+    // separate Letter kind.
+    expect(d.lookup(Kind.Start, "a")).not.toBe(kInvalidPartId);
+    expect(d.lookup(Kind.Mid, "a")).not.toBe(kInvalidPartId);
+    expect(d.lookup(Kind.End, "a")).not.toBe(kInvalidPartId);
     expect(d.hasWhole("a")).toBe(true);
     expect(d.hasDelimiter("-")).toBe(true);
-    // 26+10+6 single-char wholes, 42*3 letters, 6 connector delims.
-    expect(d.countOfKind(Kind.Whole)).toBe(42);
-    expect(d.countOfKind(Kind.Letter)).toBe(126);
-    expect(d.countOfKind(Kind.Delimiter)).toBe(6);
+    expect(d.hasDelimiter(" ")).toBe(true);
+    // 26+10+4 single-char wholes, 40 each of length-1 Start/Mid/End, 38 delimiters.
+    expect(d.countOfKind(Kind.Whole)).toBe(40);
+    expect(d.countOfKind(Kind.Start)).toBe(40);
+    expect(d.countOfKind(Kind.Mid)).toBe(40);
+    expect(d.countOfKind(Kind.End)).toBe(40);
+    expect(d.countOfKind(Kind.Delimiter)).toBe(38);
   });
 });
 

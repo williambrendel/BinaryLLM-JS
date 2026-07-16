@@ -20,17 +20,17 @@ describe("decomposer", () => {
     expect(decomposeWord(d, "the")).toEqual([id]);
   });
 
-  test("letter fill covers every uncovered position", () => {
+  test("length-1 fragment fill covers every uncovered position", () => {
     const d = new PartDictionary();
     augmentWithAtoms(d); // only singletons available
     const ids = decomposeWord(d, "xyz");
     expect(ids).toHaveLength(3);
     expect(ids.every((i) => i !== kInvalidPartId)).toBe(true);
-    // Positional encoding: x## (start), ##y## (mid), ##z (end).
+    // Position is carried by the kind: Start "x", Mid "y", End "z" (bare values).
     expect(ids).toEqual([
-      d.lookup(Kind.Letter, "x##"),
-      d.lookup(Kind.Letter, "##y##"),
-      d.lookup(Kind.Letter, "##z"),
+      d.lookup(Kind.Start, "x"),
+      d.lookup(Kind.Mid, "y"),
+      d.lookup(Kind.End, "z"),
     ]);
   });
 
