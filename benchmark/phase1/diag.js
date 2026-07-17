@@ -108,6 +108,17 @@ for (const word of TARGETS) {
   const corePruned = minCover(coreByU, coreRec), vAPruned = minCover(vAByU, coreRec);
   w.write(`  BIT-EFF @rec=${coreRec.toFixed(2)}: dominant ${byW.length}b/FP${orRec(byW, neg.Neg).toFixed(3)} · dominant-pruned ${corePruned.length}b/FP${orRec(corePruned, neg.Neg).toFixed(3)} · ⋁A-pruned ${vAPruned.length}b/FP${orRec(vAPruned, neg.Neg).toFixed(3)}\n`);
 
+  // (G) SPEED: dominant-core route (buildAffinity u+M, then replicate — the StQP) vs the naive ⋁A route (only the
+  // per-bit log-odds u + a greedy min-cover; NO edge matrix M, NO replicator). Time each stage.
+  const t0 = process.hrtime.bigint(); const aff = buildAffinity(tr, wt, neg, {}); const t1 = process.hrtime.bigint();
+  replicate(aff.u, aff.edges, { solver: "exp", rho: RHO, suppPatience: 3 }); const t2 = process.hrtime.bigint();
+  const mcAll = minCover(vAByU, wOr(vA, tr, wt)); const t3 = process.hrtime.bigint();
+  const ms = (a, b) => (Number(b - a) / 1e6).toFixed(0);
+  w.write(`  SPEED: affinity(u+M) ${ms(t0, t1)}ms · replicate ${ms(t1, t2)}ms · ⋁A min-cover ${ms(t2, t3)}ms  ⇒ dominant-core route ≈ ${ms(t0, t2)}ms(+mc) vs naive ⋁A route ≈ ${ms(t2, t3)}ms\n`);
+
+  // (H) RECALL-RETENTION waste: min-cover holding X% of the positives (target ×coreRec) — drop the tail, don't collapse.
+  for (const frac of [0.90, 0.95, 1.0]) { const tgt = frac * coreRec; const bits = minCover(vAByU, tgt); w.write(`  ⋁A-waste keep ${(frac * 100).toFixed(0)}% of core recall (tgt ${tgt.toFixed(2)}): |bits|=${bits.length} actualRec=${orRec(bits, tr).toFixed(3)} negFP=${orRec(bits, neg.Neg).toFixed(3)}\n`); }
+
   // (E) ⋂/⋃ analysis — why does twoCore (⋂, ⋃−⋂) ≡ union? is ⋂ super small, or does the tail alone already = union?
   const Gd = fc.G.length ? fc.G : fcSF.G;
   if (Gd.length) {
