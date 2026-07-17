@@ -114,7 +114,7 @@ const adaptiveCore = (A, neg, peelMode = "tight") => {                          
 const stopStrong = (A, neg) => { const G = boost(A, neg, { rho: RHO, solver: "exp", recallTau: false, suppPatience: 3 }).G; let cut = G.length; for (let i = 0; i < G.length; i++) if (G[i].recall > 0.7) { cut = i + 1; break; } return G.slice(0, cut); };
 
 // ── per-word 4-fold CV ──
-const CFGS = ["current", "currentFix", "adaptCore", "adaptCoreW", "adaptCoreF", "stopStrong", "union", "unionWaste", "intersect", "twoCore"];
+const CFGS = ["current", "currentFix", "union", "unionWaste", "unionM"];
 const w = process.stdout;
 w.write(`# consolidation CV (4-fold, REAL fitClass) | canon=${TARGETS.length} | recTrain/recHeld/FP %\n`);
 w.write(`  word          |A|   ${CFGS.map((c) => c.padEnd(15)).join("")}   K±sd  |Q|±sd[min-max]  intraJac  headα(cv)\n`);
@@ -148,18 +148,13 @@ for (const word of TARGETS) {
     const uwBits = sortAsc(uwArr);
     uniSz += uni.length; uwSz += uwBits.length;
     const build = {
-      current: G,
-      currentFix: fitFix.G,
-      adaptCore: adaptiveCore(tr, neg, "tight"),                                  // peel the waste-removed core (R_dom)
-      adaptCoreW: adaptiveCore(tr, neg, "weak"),                                  // peel only the 0.55 weak learner
-      adaptCoreF: adaptiveCore(tr, neg, "full"),                                  // peel the entire dominant set (no waste reuse)
-      stopStrong: stopStrong(tr, neg),
-      union: null,                                                              // handled by orGateEval below (OR of gates)
-      unionWaste: uwBits.length ? [{ Qbits: uwBits, m: 1, alpha: avgA }] : [],   // union-of-cores after one more waste-removal at equal recall
-      intersect: inter.length ? [{ Qbits: inter, m: 1, alpha: avgA }] : [],                       // no mfit — averaged head weight
-      twoCore: [inter.length ? { Qbits: inter, m: 1, alpha: avgA } : null, tail.length ? { Qbits: sortAsc(tail), m: 1, alpha: avgA } : null].filter(Boolean),  // (⋂, ⋃−⋂), NO fit, avg head weight for both
+      current: G,                                                               // separate cores + θ-head (2 threshold levels: per-core m_k + cross-core θ)
+      currentFix: fitFix.G,                                                      // separate cores, softFloor+balanced-α (deployed default)
+      union: null,                                                              // OR of the ORIGINAL gates — the recall ceiling (handled by orGateEval)
+      unionWaste: uwBits.length ? [mkPartA(uwBits, tr, wU, neg, avgA)].filter(Boolean) : [],  // waste-removed union as ONE m-of-n gate (mfit threshold) + θ-tune
+      unionM: uni.length ? [mkPartA(uni, tr, wU, neg, avgA)].filter(Boolean) : [],             // FULL union as ONE m-of-n gate (mfit threshold) + θ-tune
     };
-    for (const c of CFGS) { const [t, r, f] = c === "union" ? orGateEval(G, tr, te, neg) : c === "unionWaste" ? orGateEval(build.unionWaste, tr, te, neg) : tuneEval(build[c], tr, val, te, neg, lam); acc[c][0] += t; acc[c][1] += r; acc[c][2] += f; }  // union & unionWaste both raw-OR (no θ) so the compression effect is isolated
+    for (const c of CFGS) { const [t, r, f] = c === "union" ? orGateEval(G, tr, te, neg) : tuneEval(build[c], tr, val, te, neg, lam); acc[c][0] += t; acc[c][1] += r; acc[c][2] += f; }  // union = raw OR ceiling; unionWaste/unionM = single m-of-n gate, θ-tuned
     kPerFold.push(G.length);                                                     // parts per fold
     for (const g of G) { alphas.push(g.alpha); qsizes.push(g.Qbits.length); }    // head weights + part sizes across all parts/folds
     for (let i = 0; i < G.length; i++) for (let j = i + 1; j < G.length; j++) { jac += jaccard(G[i].Qbits, G[j].Qbits); jn++; }

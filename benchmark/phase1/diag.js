@@ -100,6 +100,14 @@ for (const word of TARGETS) {
     w.write(`  ⋁A min-cover@${target}: |bits|=${bits.length} negFP(OR)=${orRec(bits, neg.Neg).toFixed(3)} u[${uHi != null ? uHi.toFixed(2) : "NA"}..${uLo != null ? uLo.toFixed(2) : "NA"}]\n`);
   }
 
+  // (F) BIT-EFFICIENCY at the dominant core's OWN recall: raw dominant clique vs dominant-waste-pruned vs the naive
+  // ⋁A-waste-pruned (min-cover of ALL positive bits). How many bits does the discriminative-clique route save?
+  const minCover = (ordered, target) => { const cov = new Uint8Array(tr.length); let c = 0; const keep = []; for (const b of ordered) { let adds = false; for (const i of (postings.get(b) || [])) if (!cov[i]) { cov[i] = 1; c++; adds = true; } if (adds) keep.push(b); if (c / tr.length >= target - 1e-9) break; } return keep; };
+  const coreRec = orRec(byW, tr);
+  const coreByU = [...byW].sort((a, b) => (bitU.get(b) ?? -1e9) - (bitU.get(a) ?? -1e9));
+  const corePruned = minCover(coreByU, coreRec), vAPruned = minCover(vAByU, coreRec);
+  w.write(`  BIT-EFF @rec=${coreRec.toFixed(2)}: dominant ${byW.length}b/FP${orRec(byW, neg.Neg).toFixed(3)} · dominant-pruned ${corePruned.length}b/FP${orRec(corePruned, neg.Neg).toFixed(3)} · ⋁A-pruned ${vAPruned.length}b/FP${orRec(vAPruned, neg.Neg).toFixed(3)}\n`);
+
   // (E) ⋂/⋃ analysis — why does twoCore (⋂, ⋃−⋂) ≡ union? is ⋂ super small, or does the tail alone already = union?
   const Gd = fc.G.length ? fc.G : fcSF.G;
   if (Gd.length) {
