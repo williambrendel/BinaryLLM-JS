@@ -119,6 +119,16 @@ for (const word of TARGETS) {
   // (H) RECALL-RETENTION waste: min-cover holding X% of the positives (target ×coreRec) — drop the tail, don't collapse.
   for (const frac of [0.90, 0.95, 1.0]) { const tgt = frac * coreRec; const bits = minCover(vAByU, tgt); w.write(`  ⋁A-waste keep ${(frac * 100).toFixed(0)}% of core recall (tgt ${tgt.toFixed(2)}): |bits|=${bits.length} actualRec=${orRec(bits, tr).toFixed(3)} negFP=${orRec(bits, neg.Neg).toFixed(3)}\n`); }
 
+  // (I) CLOSED-FORM check: under bit-independence recall=1−∏(1−r_b), FP=1−∏(1−f_b). Verify vs actual on top-u ⋁A prefixes.
+  const rB = new Map(), fB = new Map(); for (const b of vA) { rB.set(b, (postings.get(b) || []).length / tr.length); fB.set(b, 0); }
+  for (const y of neg.Neg) for (const b of y) if (fB.has(b)) fB.set(b, fB.get(b) + 1);
+  for (const b of vA) fB.set(b, fB.get(b) / (neg.Neg.length || 1));
+  for (const frac of [0.25, 0.5, 1.0]) {
+    const keep = vAByU.slice(0, Math.max(1, Math.floor(vAByU.length * frac)));
+    let mR = 1, mF = 1; for (const b of keep) { mR *= 1 - rB.get(b); mF *= 1 - fB.get(b); }
+    w.write(`  CLOSED-FORM top-${(frac * 100).toFixed(0)}%u (${keep.length}b): recall pred ${(1 - mR).toFixed(2)}/act ${orRec(keep, tr).toFixed(2)} | FP pred ${(1 - mF).toFixed(3)}/act ${orRec(keep, neg.Neg).toFixed(3)}\n`);
+  }
+
   // (E) ⋂/⋃ analysis — why does twoCore (⋂, ⋃−⋂) ≡ union? is ⋂ super small, or does the tail alone already = union?
   const Gd = fc.G.length ? fc.G : fcSF.G;
   if (Gd.length) {
