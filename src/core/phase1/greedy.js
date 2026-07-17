@@ -54,15 +54,27 @@ export const buildPartGreedy = (Pplus, r, f, opts = {}) => {
 };
 
 /**
- * §3 — exact DENSITY threshold `t`, the `Rstar`-quantile of `τ_x=|Q∩x|/|x|` over VALIDATION positives (not train,
- * to avoid the phase-1 bank overfit). Falls back to 0.2 when val is too thin to estimate (`|A_val| < 150`).
+ * §3 — DENSITY threshold `t` for `|Q∩x| ≥ t·|x|`, tuned on the recall−λ·FP objective using BOTH the positive
+ * `τ_x` distribution (recall) AND the NEGATIVE one (p⁻ as the precision counter) — not just the recall quantile.
+ * A soft recall floor (Rstar−0.15) keeps the part a weak learner; `t` is free to drop lower where the negatives
+ * permit (lifting recall). Falls back to 0.2 when val is too thin (`|A_val| < 150`).
  */
-export const setThreshold = (Q, Aval, Rstar = 0.6) => {
+export const setThreshold = (Q, Aval, Neg, Rstar = 0.6, lambda = 1) => {
   if (Aval.length < 150) return 0.2;
   const Qs = sortAsc(Q);
-  const taus = Aval.map((x) => (x.length ? andCount(x, Qs) / x.length : 0)).sort((a, b) => b - a);
-  const idx = Math.min(taus.length - 1, Math.max(0, Math.floor(Rstar * Aval.length)));
-  return Math.max(0.1, Math.min(0.4, taus[idx]));
+  const pos = Aval.map((x) => (x.length ? andCount(x, Qs) / x.length : 0));
+  const neg = Neg.map((x) => (x.length ? andCount(x, Qs) / x.length : 0));
+  const cands = [...new Set([0, ...pos, ...neg])].sort((a, b) => a - b);
+  const floor = Rstar - 0.15;
+  let bt = 0.2, bo = -Infinity;
+  for (const t of cands) {
+    const rec = pos.filter((v) => v >= t).length / pos.length;
+    if (rec < floor) break;                                          // recall monotone-decreasing in t
+    const fp = neg.length ? neg.filter((v) => v >= t).length / neg.length : 0;
+    const obj = rec - lambda * fp;
+    if (obj > bo) { bo = obj; bt = t; }
+  }
+  return Math.max(0.05, Math.min(0.5, bt));
 };
 
 /** density gate: fires iff the on-target overlap fraction clears `t`. `Qs` must be bit-sorted. */
@@ -89,7 +101,7 @@ export const fitClassGreedy = (A, negPool, Mglob, opts = {}) => {
     const { r, f } = bitRates(Pcur, tr, neg.Neg, w);                  // reweighted intra-rates ⇒ score shifts each round
     const part = buildPartGreedy(Pcur, r, f, { Rstar, lambda });
     const Qs = sortAsc(part.Q); if (!Qs.length) break;
-    const t = setThreshold(Qs, val, Rstar);
+    const t = setThreshold(Qs, val, neg.Neg, Rstar, lambda);         // t tuned on recall−λ·FP (p⁻ counter)
     let recW = 0, W = 0; for (let i = 0; i < tr.length; i++) { W += w[i]; if (gateFires(tr[i], Qs, t)) recW += w[i]; } recW /= W || 1;
     if (recW < 0.5) break;                                            // weak-learner floor (below-random ⇒ dual bound spent)
     if (parts.some((p) => jaccard(p.Qs, Qs) > 0.6)) break;            // D6: this part duplicates a kept one ⇒ one bundle, stop
