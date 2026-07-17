@@ -114,7 +114,7 @@ const adaptiveCore = (A, neg, peelMode = "tight") => {                          
 const stopStrong = (A, neg) => { const G = boost(A, neg, { rho: RHO, solver: "exp", recallTau: false, suppPatience: 3 }).G; let cut = G.length; for (let i = 0; i < G.length; i++) if (G[i].recall > 0.7) { cut = i + 1; break; } return G.slice(0, cut); };
 
 // ── per-word 4-fold CV ──
-const CFGS = ["current", "avgWeights", "adaptCore", "adaptCoreW", "adaptCoreF", "stopStrong", "union", "intersect", "twoCore"];
+const CFGS = ["current", "currentFix", "adaptCore", "adaptCoreW", "adaptCoreF", "stopStrong", "union", "unionWaste", "intersect", "twoCore"];
 const w = process.stdout;
 w.write(`# consolidation CV (4-fold, REAL fitClass) | canon=${TARGETS.length} | recTrain/recHeld/FP %\n`);
 w.write(`  word          |A|   ${CFGS.map((c) => c.padEnd(15)).join("")}   K±sd  |Q|±sd[min-max]  intraJac  headα(cv)\n`);
@@ -123,28 +123,43 @@ const stats = [];
 for (const word of TARGETS) {
   const Aw = classA.get(word); if (Aw.length < 8) continue;
   const acc = Object.fromEntries(CFGS.map((c) => [c, [0, 0, 0]]));
-  let jac = 0, jn = 0; const alphas = [], qsizes = [], kPerFold = [];
+  let jac = 0, jn = 0, uniSz = 0, uwSz = 0; const alphas = [], qsizes = [], kPerFold = [];
   for (let fold = 0; fold < 4; fold++) {
     const fa = [], te = []; for (let k = 0; k < Aw.length; k++) (k % 4 === fold ? te : fa).push(Aw[k]);
     const nTr = Math.max(1, Math.floor(fa.length * 0.75)); const tr = fa.slice(0, nTr), val = fa.slice(nTr);
-    const fit = fitClass(fa, negPool, Mglob, { rho: RHO, delta: DBAND });   // REAL pipeline
+    const fit = fitClass(fa, negPool, Mglob, { rho: RHO, delta: DBAND });   // REAL pipeline (recallFloor 0.5)
+    const fitFix = fitClass(fa, negPool, Mglob, { rho: RHO, delta: DBAND, softFloor: true });  // fix: keep 0.5 where reachable, else admit the m=1 max-recall sense-clique
     const neg = fit.neg, G = fit.G, lam = Math.min(3, Math.max(1, 1500 / fa.length)), wU = new Float64Array(tr.length).fill(1 / tr.length);
     const avgA = mean(G.map((g) => g.alpha)) || 0.5;
     const uni = sortAsc(G.flatMap((g) => g.Qbits));
     let inter = G.length ? [...G[0].Qbits] : []; for (const g of G.slice(1)) { const S = new Set(g.Qbits); inter = inter.filter((b) => S.has(b)); }
     inter = sortAsc(inter); const iset = new Set(inter); const tail = uni.filter((b) => !iset.has(b));
+    // unionWaste: ONE more waste-removal on the union-of-cores as a weight-first MIN-COVER — walk the union bits in
+    // discriminative (log-odds u desc) order and KEEP a bit only if it covers a NEW positive, until the union's OR-
+    // recall is held. Drops genuinely redundant bits (a prefix can't — it retains covered-already middle bits).
+    const { u: uUni } = buildAffinity(tr, wU, neg, {});
+    const bitU = new Map(); for (let p = 0; p < uUni.length; p++) bitU.set(neg.pPlus[p], uUni[p]);
+    const uniByU = [...uni].sort((a, b) => (bitU.get(b) ?? -1e9) - (bitU.get(a) ?? -1e9));
+    const uniSet = new Set(uni), postings = new Map(); for (const b of uni) postings.set(b, []);
+    for (let i = 0; i < tr.length; i++) for (const b of tr[i]) if (uniSet.has(b)) postings.get(b).push(i);
+    const Runion = wOr(uni, tr, wU); let Wtr = 0; for (let i = 0; i < tr.length; i++) Wtr += wU[i];
+    const covMC = new Uint8Array(tr.length); let wcMC = 0; const uwArr = [];
+    for (const b of uniByU) { let adds = false; for (const i of postings.get(b)) if (!covMC[i]) { covMC[i] = 1; wcMC += wU[i]; adds = true; } if (adds) uwArr.push(b); if (wcMC / (Wtr || 1) >= Runion - 1e-9) break; }
+    const uwBits = sortAsc(uwArr);
+    uniSz += uni.length; uwSz += uwBits.length;
     const build = {
       current: G,
-      avgWeights: G.map((g) => ({ Qbits: g.Qbits, m: g.m, alpha: avgA })),
+      currentFix: fitFix.G,
       adaptCore: adaptiveCore(tr, neg, "tight"),                                  // peel the waste-removed core (R_dom)
       adaptCoreW: adaptiveCore(tr, neg, "weak"),                                  // peel only the 0.55 weak learner
       adaptCoreF: adaptiveCore(tr, neg, "full"),                                  // peel the entire dominant set (no waste reuse)
       stopStrong: stopStrong(tr, neg),
       union: null,                                                              // handled by orGateEval below (OR of gates)
-      intersect: [mkPartA(inter, tr, wU, neg, avgA)].filter(Boolean),
-      twoCore: [mkPartA(inter, tr, wU, neg, avgA), mkPartA(tail, tr, wU, neg, avgA)].filter(Boolean),
+      unionWaste: uwBits.length ? [{ Qbits: uwBits, m: 1, alpha: avgA }] : [],   // union-of-cores after one more waste-removal at equal recall
+      intersect: inter.length ? [{ Qbits: inter, m: 1, alpha: avgA }] : [],                       // no mfit — averaged head weight
+      twoCore: [inter.length ? { Qbits: inter, m: 1, alpha: avgA } : null, tail.length ? { Qbits: sortAsc(tail), m: 1, alpha: avgA } : null].filter(Boolean),  // (⋂, ⋃−⋂), NO fit, avg head weight for both
     };
-    for (const c of CFGS) { const [t, r, f] = c === "union" ? orGateEval(G, tr, te, neg) : tuneEval(build[c], tr, val, te, neg, lam); acc[c][0] += t; acc[c][1] += r; acc[c][2] += f; }
+    for (const c of CFGS) { const [t, r, f] = c === "union" ? orGateEval(G, tr, te, neg) : c === "unionWaste" ? orGateEval(build.unionWaste, tr, te, neg) : tuneEval(build[c], tr, val, te, neg, lam); acc[c][0] += t; acc[c][1] += r; acc[c][2] += f; }  // union & unionWaste both raw-OR (no θ) so the compression effect is isolated
     kPerFold.push(G.length);                                                     // parts per fold
     for (const g of G) { alphas.push(g.alpha); qsizes.push(g.Qbits.length); }    // head weights + part sizes across all parts/folds
     for (let i = 0; i < G.length; i++) for (let j = i + 1; j < G.length; j++) { jac += jaccard(G[i].Qbits, G[j].Qbits); jn++; }
@@ -154,8 +169,8 @@ for (const word of TARGETS) {
   const Km = mean(kPerFold), Ksd = sd(kPerFold, Km), Jm = jn ? jac / jn : 0;
   const Qm = mean(qsizes), Qsd = sd(qsizes, Qm), Qmin = qsizes.length ? Math.min(...qsizes) : 0, Qmax = qsizes.length ? Math.max(...qsizes) : 0;
   const aMean = mean(alphas), aCv = aMean ? sd(alphas, aMean) / aMean : 0, aSorted = alphas.slice().sort((a, b) => b - a).map((a) => +a.toFixed(3));
-  stats.push({ word, A: Aw.length, K: +Km.toFixed(1), Ksd: +Ksd.toFixed(1), Q: +Qm.toFixed(0), Qsd: +Qsd.toFixed(0), Qmin, Qmax, jac: +Jm.toFixed(2), aMean: +aMean.toFixed(3), aCv: +aCv.toFixed(2), alphas: aSorted });
-  w.write(`  ${word.padEnd(12)}${String(Aw.length).padStart(5)}   ${cells.join("")}   ${Km.toFixed(0).padStart(2)}±${Ksd.toFixed(0)}  ${Qm.toFixed(0).padStart(3)}±${Qsd.toFixed(0)}[${Qmin}-${Qmax}]  ${Jm.toFixed(2)}  α${aMean.toFixed(2)}cv${aCv.toFixed(2)}\n`);
+  stats.push({ word, A: Aw.length, K: +Km.toFixed(1), Ksd: +Ksd.toFixed(1), Q: +Qm.toFixed(0), Qsd: +Qsd.toFixed(0), Qmin, Qmax, jac: +Jm.toFixed(2), aMean: +aMean.toFixed(3), aCv: +aCv.toFixed(2), uniBits: +(uniSz / 4).toFixed(0), uwBits: +(uwSz / 4).toFixed(0), alphas: aSorted });
+  w.write(`  ${word.padEnd(12)}${String(Aw.length).padStart(5)}   ${cells.join("")}   ${Km.toFixed(0).padStart(2)}±${Ksd.toFixed(0)}  ${Qm.toFixed(0).padStart(3)}±${Qsd.toFixed(0)}[${Qmin}-${Qmax}]  ${Jm.toFixed(2)}  α${aMean.toFixed(2)}cv${aCv.toFixed(2)}  ⋃${(uniSz / 4).toFixed(0)}→${(uwSz / 4).toFixed(0)}\n`);
 }
 w.write(`  ${"MEAN".padEnd(12)}${"".padStart(5)}   ${CFGS.map((c) => `${(agg[c].t / agg[c].n).toFixed(0)}/${(agg[c].r / agg[c].n).toFixed(0)}/${(agg[c].f / agg[c].n).toFixed(0)}`.padEnd(15)).join("")}\n`);
 w.write(`# CFGJSON ${JSON.stringify(CFGS.map((c) => ({ cfg: c, train: +(agg[c].t / agg[c].n).toFixed(1), held: +(agg[c].r / agg[c].n).toFixed(1), fp: +(agg[c].f / agg[c].n).toFixed(1) })))}\n`);

@@ -23,7 +23,7 @@ import andCount from "../math/sparse/andCount.js";
  * @returns {{G:Array, pMin:number, unionRecall:number, curve:Array, rounds:number, stop:string}}
  */
 export const boost = (A, neg, opts = {}) => {
-  const { rho = 40, maxRounds = 50, solver = "exp", alphaR, epsMin = 1e-10, recallTau = false, tauFloor = 0.5, suppPatience } = opts;
+  const { rho = 40, maxRounds = 50, solver = "exp", alphaR, epsMin = 1e-10, recallTau = false, tauFloor = 0.5, suppPatience, recallFloor = 0.5, softFloor = false, minRecall = 0.25 } = opts;
   const nA = A.length, pMin = nA / (nA + neg.negN);
   let w = new Float64Array(nA).fill(1 / nA);
   const G = [], curve = [], covered = new Array(nA).fill(false);
@@ -49,12 +49,24 @@ export const boost = (A, neg, opts = {}) => {
     Qbits.sort((a, b) => a - b);
     if (Qbits.length === 0) { stop = "empty_part"; break; }
 
-    const fit = mfit(Qbits, A, w, neg.Neg);
-    if (!fit.valid) { noValidM++; stop = "no_valid_m"; break; }            // support ceiling < 0.5 ⇒ ρ too small
-    if (fit.precision < pMin) { stop = "dual_bound_precision"; break; }
+    const fit = mfit(Qbits, A, w, neg.Neg, { recallFloor, softFloor, minRecall });
+    if (!fit.valid) { noValidM++; stop = "no_valid_m"; break; }            // even m=1 (OR) under recallFloor ⇒ multimodal/diffuse class — lower recallFloor to admit sub-0.5 sense-cliques as weak learners
+    // dual bound: a below-p_min part means AdaBoost's guarantee is spent → stop. But for a multimodal/diffuse class
+    // the per-sense cliques can each sit below p_min (each fires on the OTHER senses' confusables); breaking there
+    // discards the whole class (music: 0 parts). Under softFloor, ADMIT them as weak learners — union_recall/max_rounds
+    // still bound the loop, and the outer prefix early-stop + θ-head control the resulting FP.
+    if (fit.precision < pMin && !softFloor) { stop = "dual_bound_precision"; break; }
 
-    // AdaBoost vote with ε-clip (perfect-recall part else gives α=∞); recall≥0.5 already (fit.valid)
-    const eps = Math.min(Math.max(1 - fit.recall, epsMin), 1 - epsMin);
+    // AdaBoost vote with ε-clip (perfect-recall part else gives α=∞). Default ε=1−recall is only valid for recall≥0.5;
+    // a softFloor part (recall<0.5) would get a NEGATIVE α, which INVERTS a one-sided OR gate (fires⇒evidence-FOR the
+    // class) into evidence-against — flipping both the head and the reweighting. Under softFloor use the proper BALANCED
+    // error (½ missed-positives + ½ false-positives) so a low-FP part earns a POSITIVE vote even at sub-0.5 recall.
+    let eps;
+    if (softFloor) {
+      const tp = fit.recall * nA, fp = fit.precision > 0 ? tp * (1 - fit.precision) / fit.precision : nA;
+      eps = 0.5 * (1 - fit.recall) + 0.5 * Math.min(1, fp / (neg.negN || 1));
+    } else eps = 1 - fit.recall;
+    eps = Math.min(Math.max(eps, epsMin), 1 - epsMin);
     const alpha = 0.5 * Math.log((1 - eps) / eps);
     G.push({ Qbits, m: fit.m, alpha, recall: fit.recall, precision: fit.precision });
 

@@ -26,25 +26,34 @@ import andCount from "../math/sparse/andCount.js";
  *   is the support ceiling (m=1, OR over Q) used by the §6 well-posedness diagnostic.
  */
 export const mfit = (Qbits, A, w, Neg, opts = {}) => {
-  const { recallFloor = 0.5 } = opts;
+  const { recallFloor = 0.5, softFloor = false, minRecall = 0.25 } = opts;
   const maxm = Qbits.length; if (maxm === 0) return { valid: false, recallAt1: 0 };
   const nA = A.length;
   const cA = new Int32Array(nA); for (let i = 0; i < nA; i++) cA[i] = andCount(A[i], Qbits);
   const cN = new Int32Array(Neg.length); for (let j = 0; j < Neg.length; j++) cN[j] = andCount(Neg[j], Qbits);
   let W = 0; for (let i = 0; i < nA; i++) W += w[i];
 
+  const precAt = (m) => { let fp = 0; for (let j = 0; j < cN.length; j++) if (cN[j] >= m) fp++; return fp; };
   let best = null, recallAt1 = 0;
   for (let m = 1; m <= maxm; m++) {
     let tw = 0; for (let i = 0; i < nA; i++) if (cA[i] >= m) tw += w[i];
     const recall = tw / (W || 1);
     if (m === 1) recallAt1 = recall;                                     // support ceiling (well-posedness, §6)
     if (recall < recallFloor) continue;                                  // recall is monotone-decreasing in m
-    let fp = 0; for (let j = 0; j < cN.length; j++) if (cN[j] >= m) fp++;
+    const fp = precAt(m);
     // §6: base-rate-correct precision — tp on the COUNT scale (recall_w·|A|), commensurate with the count fp
     const tp = recall * nA, precision = tp + fp > 0 ? tp / (tp + fp) : 0;
     if (!best || precision > best.precision) best = { m, recall, precision };
   }
-  return best ? { ...best, recallAt1, valid: true } : { valid: false, recallAt1 };
+  if (best) return { ...best, recallAt1, valid: true };
+  // softFloor: no m clears recallFloor (multimodal/diffuse class — even the full OR covers < floor). Rather than
+  // reject and abort boosting, admit the m=1 max-recall clique as a WEAK learner so AdaBoost can reweight to the
+  // remaining senses. Guarded by minRecall so a genuinely empty clique still fails.
+  if (softFloor && recallAt1 >= minRecall) {
+    const fp = precAt(1), tp = recallAt1 * nA, precision = tp + fp > 0 ? tp / (tp + fp) : 0;
+    return { m: 1, recall: recallAt1, precision, recallAt1, valid: true };
+  }
+  return { valid: false, recallAt1 };
 };
 
 export default mfit;

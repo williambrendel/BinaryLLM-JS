@@ -15,6 +15,7 @@ import buildNegSet from "../../src/core/phase1/negSet.js";
 import buildAffinity from "../../src/core/phase1/affinity.js";
 import replicate from "../../src/core/phase1/replicator.js";
 import boost from "../../src/core/phase1/boost.js";
+import fitClass from "../../src/core/phase1/fit.js";
 import mfit from "../../src/core/phase1/mfit.js";
 import andCount from "../../src/core/math/sparse/andCount.js";
 
@@ -57,10 +58,13 @@ for (const word of TARGETS) {
   const pMin = tr.length / (tr.length + neg.negN);
   w.write(`\n=== ${word} | |A|=${A.length} tr=${tr.length} negN=${neg.negN} pMin=${pMin.toFixed(3)} p⁺bits=${neg.pPlus.length} ===\n`);
 
-  // (A) MUSIC-style: run boost, report stop reason + curve
+  // (A) MUSIC-style: run boost, report stop reason + curve — WITHOUT and WITH softFloor
   const res = boost(tr, neg, { rho: RHO, solver: "exp", recallTau: true, tauFloor: 0.6, suppPatience: 3 });
-  w.write(`  boost: stop=${res.stop} rounds=${res.rounds} G=${res.G.length}\n`);
+  w.write(`  boost(default): stop=${res.stop} rounds=${res.rounds} G=${res.G.length}\n`);
   res.curve.slice(0, 4).forEach((c) => w.write(`    r${c.round}: rec=${c.recall.toFixed(2)} prec=${c.precision.toFixed(3)} (pMin=${pMin.toFixed(3)}) m=${c.m} |Q|=${c.size} unionRec=${c.unionRecall.toFixed(2)}\n`));
+  const resSF = boost(tr, neg, { rho: RHO, solver: "exp", recallTau: true, tauFloor: 0.6, suppPatience: 3, softFloor: true });
+  w.write(`  boost(softFloor): stop=${resSF.stop} rounds=${resSF.rounds} G=${resSF.G.length}\n`);
+  resSF.curve.slice(0, 4).forEach((c) => w.write(`    r${c.round}: rec=${c.recall.toFixed(2)} prec=${c.precision.toFixed(3)} (pMin=${pMin.toFixed(3)}) m=${c.m} |Q|=${c.size} unionRec=${c.unionRecall.toFixed(2)}\n`));
 
   // (B) round-0 raw: dominant size, mfit at the FULL dominant + at recall-grown prefixes (huge-bits question)
   const wt = new Float64Array(tr.length).fill(1 / tr.length);
@@ -69,6 +73,40 @@ for (const word of TARGETS) {
   const byW = r.Q.map((p, i) => [neg.pPlus[p], r.wPart[i]]).sort((a, b) => b[1] - a[1]).map((e) => e[0]);
   const Rdom = wOr(byW, tr, wt);
   const fitFull = mfit(sortAsc(byW), tr, wt, neg.Neg);
-  w.write(`  round0: |dominant|=${byW.length} R_dom(OR)=${Rdom.toFixed(2)} | mfit(full): m=${fitFull.m} rec=${(fitFull.recall || 0).toFixed(2)} prec=${(fitFull.precision || 0).toFixed(3)} valid=${fitFull.valid} recAt1=${(fitFull.recallAt1 || 0).toFixed(2)}\n`);
+  const fitSF = mfit(sortAsc(byW), tr, wt, neg.Neg, { softFloor: true });
+  w.write(`  round0: |dominant|=${byW.length} R_dom(OR)=${Rdom.toFixed(2)} | mfit(default): valid=${fitFull.valid} m=${fitFull.m} rec=${(fitFull.recall || 0).toFixed(2)} prec=${(fitFull.precision || 0).toFixed(3)} recAt1=${(fitFull.recallAt1 || 0).toFixed(2)}\n`);
+  w.write(`          mfit(softFloor,minRecall=0.25): valid=${fitSF.valid} m=${fitSF.m} rec=${(fitSF.recall || 0).toFixed(2)} prec=${(fitSF.precision || 0).toFixed(3)} recAt1=${(fitSF.recallAt1 || 0).toFixed(2)} | pMin=${pMin.toFixed(3)} → precision<pMin? ${((fitSF.precision || 0) < pMin)}\n`);
   w.write(`  bits to reach weighted-OR recall: 0.5→${nToRecall(byW, tr, wt, 0.5)} 0.6→${nToRecall(byW, tr, wt, 0.6)} 0.7→${nToRecall(byW, tr, wt, 0.7)} 0.8→${nToRecall(byW, tr, wt, 0.8)} (of ${byW.length})\n`);
+  // (C) full fitClass path — does softFloor survive the fitClass wrapper (forwarding + prefix early-stop)?
+  const fc = fitClass(A, negPool, Mglob, { rho: RHO, delta: DBAND });
+  const fcSF = fitClass(A, negPool, Mglob, { rho: RHO, delta: DBAND, softFloor: true });
+  w.write(`  fitClass(default): G=${fc.G.length} rStar=${fc.rStar}/${fc.roundsTotal} | fitClass(softFloor): G=${fcSF.G.length} rStar=${fcSF.rStar}/${fcSF.roundsTotal} valRec=${(fcSF.valRecall || 0).toFixed(2)} valFP=${(fcSF.valConfFP || 0).toFixed(2)}\n`);
+  if (fcSF.G.length) { const g0 = fcSF.G[0], nn = fcSF.neg.Neg, sq = [...g0.Qbits].sort((a, b) => a - b); const gfp = nn.filter((y) => andCount(y, sq) >= g0.m).length / nn.length; const hfp = nn.filter((y) => fcSF.head.fires(y)).length / nn.length; w.write(`  PROBE: G[0] m=${g0.m} |Q|=${g0.Qbits.length} α=${g0.alpha.toFixed(3)} | rawGateFP(fcNeg,${nn.length})=${gfp.toFixed(3)} tunedHeadFP=${hfp.toFixed(3)} θ=${fcSF.theta.toFixed(3)} Σα=${fcSF.G.reduce((s, g) => s + g.alpha, 0).toFixed(2)}\n`); }
+
+  // (D) STRUCTURE: dominant core, ⋁A (union of ALL positive signatures), and ⋁A waste-removed (discriminative min-cover)
+  const orRec = (bits, pool) => { if (!bits.length) return 0; const s = sortAsc(bits); return pool.length ? pool.filter((y) => andCount(y, s) >= 1).length / pool.length : 0; };
+  w.write(`  CORE(dominant): |Q|=${byW.length} posRec(OR)=${orRec(byW, tr).toFixed(2)} negFP(OR)=${orRec(byW, neg.Neg).toFixed(3)}\n`);
+  const vAset = new Set(); for (const y of tr) for (const b of y) vAset.add(b);
+  const vA = sortAsc([...vAset]);
+  w.write(`  ⋁A(all pos sigs): |bits|=${vA.length} posRec=${orRec(vA, tr).toFixed(2)} negFP(OR)=${orRec(vA, neg.Neg).toFixed(3)}\n`);
+  const bitU = new Map(); for (let p = 0; p < u.length; p++) bitU.set(neg.pPlus[p], u[p]);
+  const vAByU = [...vA].sort((a, b) => (bitU.get(b) ?? -1e9) - (bitU.get(a) ?? -1e9));
+  const postings = new Map(); for (const b of vA) postings.set(b, []);
+  for (let i = 0; i < tr.length; i++) for (const b of tr[i]) postings.get(b).push(i);
+  for (const target of [0.5, 0.7, 0.9]) {                    // discriminative (u-desc) min-cover to hold `target` positive coverage
+    const cov = new Uint8Array(tr.length); let c = 0; const bits = [];
+    for (const b of vAByU) { let adds = false; for (const i of postings.get(b)) if (!cov[i]) { cov[i] = 1; c++; adds = true; } if (adds) bits.push(b); if (c / tr.length >= target) break; }
+    const uHi = bitU.get(bits[0]), uLo = bitU.get(bits[bits.length - 1]);
+    w.write(`  ⋁A min-cover@${target}: |bits|=${bits.length} negFP(OR)=${orRec(bits, neg.Neg).toFixed(3)} u[${uHi != null ? uHi.toFixed(2) : "NA"}..${uLo != null ? uLo.toFixed(2) : "NA"}]\n`);
+  }
+
+  // (E) ⋂/⋃ analysis — why does twoCore (⋂, ⋃−⋂) ≡ union? is ⋂ super small, or does the tail alone already = union?
+  const Gd = fc.G.length ? fc.G : fcSF.G;
+  if (Gd.length) {
+    const uniS = new Set(); for (const g of Gd) for (const b of g.Qbits) uniS.add(b);
+    let interB = [...Gd[0].Qbits]; for (const g of Gd.slice(1)) { const s = new Set(g.Qbits); interB = interB.filter((b) => s.has(b)); }
+    const iSet = new Set(interB); const tailB = [...uniS].filter((b) => !iSet.has(b));
+    const iCov = orRec(interB, tr), tCov = orRec(tailB, tr), uCov = orRec([...uniS], tr);
+    w.write(`  ⋂/⋃: K=${Gd.length} |⋂|=${interB.length} |⋃|=${uniS.size} |tail|=${tailB.length} | ⋂cov=${iCov.toFixed(2)} tailcov=${tCov.toFixed(2)} ⋃cov=${uCov.toFixed(2)} | tail≈union? Δ=${Math.abs(tCov - uCov).toFixed(3)} | ⋂ adds over tail: ${(uCov - tCov).toFixed(3)}\n`);
+  }
 }
