@@ -43,14 +43,18 @@ export const fitClass = (A, negPool, Mglob, opts = {}) => {
   // solver="exp" (Pelillo exponential replicator, DEFAULT) + suppPatience=3 support-stability early-stop:
   // exp never fully converges, so stopping once the extracted set settles is ~2.6× faster and quality-neutral
   // (only the ranking is used). solver="dc" (matrix-split) is the parameter-free alternative — parts-equivalent.
-  const { valFrac = 0.25, rho = 80, solver = "exp", delta = 0.05, fpWeight = autoFp, tuneTheta = true, earlyStop = true, recallTau = true, tauFloor = 0.6, suppPatience = 3, maskNodes = new Set(), ...boostOpts } = opts;
+  // softFloor (DEFAULT ON): admit a sub-0.5 dominant clique as a weak learner (with the proper balanced-error α, so
+  // its one-sided vote stays POSITIVE) instead of aborting boost. The old hard 0.5 recall floor is scale-fragile —
+  // recAt1 falls as |A| grows, so it silently dropped good low-FP cores on large corpora (music/state/world → 0 parts).
+  // CV (wiki+en dict, 4-fold): held recall 67-69% → 84% (+15-17pp) for +3-4pp FP; music/state 0 → 84-86. §8.
+  const { valFrac = 0.25, rho = 80, solver = "exp", delta = 0.05, fpWeight = autoFp, tuneTheta = true, earlyStop = true, recallTau = true, tauFloor = 0.6, suppPatience = 3, maskNodes = new Set(), softFloor = true, minRecall = 0.25, ...boostOpts } = opts;
   const nTr = Math.max(1, Math.floor(A.length * (1 - valFrac)));
   const tr = A.slice(0, nTr), val = A.slice(nTr);
 
   const neg = buildNegSet(tr, negPool, Mglob, { delta, maskNodes, negIndex: opts.negIndex, negLen: opts.negLen });  // node mask (default ∅ = keep); optional shared inverted index (§opt)
   // recallTau: extract each part as a WEAK learner (support grown from top-x* until weighted recall just
   // clears tauFloor), not the full strong dominant set — the correct weak-classifier input to AdaBoost.
-  const { G } = boost(tr, neg, { rho, solver, recallTau, tauFloor, suppPatience, ...boostOpts });
+  const { G } = boost(tr, neg, { rho, solver, recallTau, tauFloor, suppPatience, softFloor, minRecall, ...boostOpts });
 
   // outer early-stop: prefix maximizing val (recall − λ·confFP), λ=fpWeight; ties → shortest prefix.
   // earlyStop=false ⇒ keep the FULL discovered set (no trim).

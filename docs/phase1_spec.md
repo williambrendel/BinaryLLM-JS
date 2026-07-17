@@ -297,13 +297,23 @@ Head `S_τ(x) = Σ_k α_k h_k(x)`, `h_k = 1[|Q_k ∧ x| ≥ m_k]`, `fires = S_τ
 fitClass:
     (A_tr, A_val) = split(A, valFrac=0.25)
     Neg = buildNegSet(A_tr, negPool, Mglob, maskSelect=DD_sel(0.05), maskNodes=∅ /*KEEP*/, δ=0.05)
-    G   = boost(A_tr, Neg, ρ=80, solver=exp, recallTau=true, tauFloor=0.6)   # train-pure
+    G   = boost(A_tr, Neg, ρ=80, solver=exp, recallTau=true, tauFloor=0.6, softFloor=true)   # train-pure
     r*  = val prefix maximizing (recall_val − fpWeight·confFP_val)           # early-stop
     θ   = val θ-tune on G[:r*], fpWeight = clamp(1500/|A|,1,3)               # adaptive λ
     return { head: makeHead(G[:r*], θ), G, r*, neg }
 ```
-Defaults: `valFrac 0.25, rho 80, solver exp, delta 0.05, recallTau true, tauFloor 0.6, maskNodes ∅,
-fpWeight auto, tuneTheta true, earlyStop true`. Test: `__tests__/core/phase1/fit.test.js` (4 green; the smoke
+Defaults: `valFrac 0.25, rho 80, solver exp, delta 0.05, recallTau true, tauFloor 0.6, softFloor true,
+minRecall 0.25, maskNodes ∅, fpWeight auto, tuneTheta true, earlyStop true`.
+
+**`softFloor` = true is the deployed default `[DEPLOYED+CV]`** (added after the hard 0.5 recall floor was found
+scale-fragile). The `mfit` recall floor 0.5 is maxed at m=1 (`recAt1`); for a diffuse/multimodal class the whole
+dominant clique OR'd covers only `recAt1` < 0.5, so `boost` aborts round-0 → **0 parts**. `recAt1` *falls as |A|
+grows*, so at wiki-scale this silently zeroes not just music but state/world/government too. `softFloor` admits
+the m=1 max-recall clique as a weak learner (guard `minRecall=0.25`). Its AdaBoost vote uses the **balanced error**
+`eps = ½(1−recall) + ½·FP` (not `1−recall`), because a one-sided OR gate at recall<0.5 would otherwise get a
+NEGATIVE α that inverts it (flipping the head and the reweighting). CV (wiki+en dict, 4-fold): held recall
+**67–69% → 84%** (+15–17pp) for +3–4pp FP; music/state **0 → 84–86**; beats the adaptive-core on both axes.
+Gated so `softFloor=false` reproduces the pre-fix path bit-identically. Test: `__tests__/core/phase1/fit.test.js` (4 green; the smoke
 recall assertion is relaxed to > 0.55 because the deployed config is a weak-learner ensemble at a val-tuned
 operating point — moderate recall by design on toy data).
 
