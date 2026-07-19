@@ -23,14 +23,14 @@ import andCount from "../math/sparse/andCount.js";
  * @returns {{G:Array, pMin:number, unionRecall:number, curve:Array, rounds:number, stop:string}}
  */
 export const boost = (A, neg, opts = {}) => {
-  const { rho = 40, maxRounds = 50, solver = "exp", alphaR, epsMin = 1e-10, recallTau = false, tauFloor = 0.5, suppPatience, recallFloor = 0.5, softFloor = false, minRecall = 0.25, andObjective = false } = opts;
+  const { rho = 40, maxRounds = 50, solver = "exp", alphaR, epsMin = 1e-10, recallTau = false, tauFloor = 0.5, suppPatience, recallFloor = 0.5, softFloor = false, minRecall = 0.25 } = opts;
   const nA = A.length, pMin = nA / (nA + neg.negN);
   let w = new Float64Array(nA).fill(1 / nA);
   const G = [], curve = [], covered = new Array(nA).fill(false);
   let stop = "max_rounds", noValidM = 0;
 
   for (let round = 0; round < maxRounds; round++) {
-    const { u, edges } = buildAffinity(A, w, neg, { alphaR, andObjective });
+    const { u, edges } = buildAffinity(A, w, neg, { alphaR });
     const r = replicate(u, edges, { solver, rho, ...(suppPatience ? { suppPatience } : {}) });
     if (r.Q.length === 0) { stop = "empty_part"; break; }
 

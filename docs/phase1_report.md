@@ -594,3 +594,84 @@ core count is word-specific (1–6, a semantic property). Canon result: FP 4–2
   parts — the strongest evidence the parts are real.
 - Remaining ablations **T3** (precision basis), **T4** (soft m-of-n), **T5** (`a⁻:a⁺`).
 - Phase 2: draw `p⁻` from other classes' `{p⁺_i}` and re-evaluate the full gate.
+
+## 15. Greedy: the fast path, and the full dead-end map
+
+The replicator (StQP + AdaBoost) is expensive. We built a **greedy bit-sort alternative** (`greedy.js`) and
+ran an exhaustive CV to decide whether the replicator's co-occurrence machinery is load-bearing. **Verdict:
+greedy is the ceiling** — it matches the replicator's held recall/FP at ~13× the speed, and *nothing* richer
+beats it. Benchmark: `benchmark/phase1/greedyBench.js` (canon 4-fold, `wiki.train`).
+
+### 15.1 The deployed greedy path
+
+Sort candidate bits by discriminativeness `(r_b+α)/(f_b+α)`; peel to a weak-recall floor accumulating the
+**closed-form independence** recall/FP running product (`1−∏(1−r_b)` — verified in §fac4efb: FP ~exact,
+recall within ~0.04); set an **FP-aware DENSITY threshold** `t` for `|Q∩x| ≥ t·|x|` by maximizing
+`recall−λ·FP` over BOTH the positive and NEGATIVE `τ=|Q∩x|/|x|` distributions (p⁻ as the precision counter);
+AdaBoost-flavored reweight+peel into an ensemble; α-sum head with val-tuned θ.
+
+**CV (canon 4-fold): greedy 85/11 held-rec/FP vs replicator 84/12, at 1.1s vs 14s (~13×).** Same coverage,
+different bits — the overlap analysis (below) shows greedy and the replicator fire on the *same* held-out
+positives (coverage-Jaccard 0.87, containment 0.93) using only ~39% shared bits. So M buys a *different bit
+representation, not different positives.*
+
+**Two selectors, equivalent:** `selectBy:"or"` (the ratio sort above) and `selectBy:"marginal"` (the
+principled twin — forward-greedy on the closed-form `R−λ·FP` marginal `(1−rec)·r_b − λ·(1−fp)·f_b`, **α-free**,
+auto-adaptive λ). They tie on accuracy and speed; `marginal` is the *derived* metric (no `α` to tune), `or`
+is the fast heuristic.
+
+### 15.2 Everything tried, and why it failed
+
+| idea | what it does | CV verdict |
+|---|---|---|
+| **AND-objective** `M̃=diag(u)·M·diag(u)` | unary *gates* edges, drop the linear term (AND, not OR) | **rejected** — kills the unary recall channel (recall 84→58); music/river → 0 parts. *Recall lives in the unary.* |
+| **refine-on-subset** | run the replicator on greedy's bits to extract the co-occurring core | **rejected** — collapses recall 85→34; the clique destroys greedy's *disjunctive* coverage |
+| **per-subpart cooc gate** `Σ M_k[a,b]` | score presence by within-subpart co-occurrence, not a flat count | **rejected** — caps recall (54 held) and overfits badly (train→held gap 16, up to 35 on rare words); the pairwise M is data-hungry |
+| **usum gate** `Σ u_b` | per-bit log-odds sum instead of the density count | ties-to-worse (80 vs 85); no gain |
+| **drop scaffold** (`I = Q ∩ fingerprints`) | keep only rare+recurring bits, drop the coverage scaffold | **rejected** — at *matched recall* `I` has ≥ FP, not less (physics +13, government +11); the scaffold *buys recall* |
+| **density-matched selection** | forward-select on the density gate's own `R−λ·FP` (re-tune t per bit) | **rejected** — tighter (K2.5, \|Q\|184) but −recall (81 vs 85), overfits FP on small words |
+| **density-mass proxy** (`r_b^d/f_b^d`, length-weighted) | cheap per-bit charge for neg-density | same tightness-for-recall trade; the density cost is *joint*, not per-bit |
+| **ordering: diff `r−λf`** | coverage-net-of-FP sort instead of the ratio | **worse** (75/20) — front-loads common high-FP bits |
+| **ordering: marginal** | adaptive closed-form `R−λ·FP` forward greedy | **ties** ratio (84/11), α-free — kept as the principled twin |
+| **α tuning** of the ratio | interpolates ratio (small α) ↔ diff (large α) | moot — the good end (small α = ratio) is already the default; diff end is worse |
+| **single grown part** (no knee, no boost) | one part grown past the knee to high recall | 80 vs ensemble 85 (**+10pp on rare words**) — **the boost is genuinely needed** |
+
+### 15.3 Why greedy wins (the structural insight)
+
+The signal is **marginal + disjunctive**, established bottom-up (`benchmark/phase1/overfitBench.js`, removed):
+- **Every positive is identifiable by ONE rare bit** (per-signature <1% FP fingerprints are ~100% single-bit),
+  but those bits are **one-off** (state: 8514 unique). **Recurrence, not rarity, is the axis** — one-off rare
+  bits overfit; recurring rare bits are ideal; greedy captures the recurring ones (top-50 98–100% in Q) and
+  drops the overfit tail.
+- **Diffuse vs concentrated = bit diversity.** A diffuse class is a union of thousands of individually-weak
+  (~1%-FP) recurring bits; concentrated classes reuse a small core (century: 29 bits cover 50%). The
+  diffuse-word **FP floor is intrinsic** — OR ~thousands of weakly-discriminative bits and the union fires on
+  many negatives. No reordering, gate, or objective escapes it; it's the shape of the class.
+- **Co-occurrence buys a representation, not reach.** Greedy (marginal) and the replicator (cliques) cover the
+  *same* positives; M just picks a different, partly-disjoint bit set. So the StQP machinery isn't load-bearing.
+
+### 15.4 The head is a weighted vote, not an OR (`_headprobe`)
+
+Asked whether the ensemble reduces to OR-ing the cores. **No.** Thresholds `t_k` are ~uniform (≈0.08, cv
+<0.23), but the AdaBoost weights `α_k` are **not** (cv 0.8–1.3), and for almost every word **θ > min α** — a
+single gate firing doesn't cross θ. OR-ing the cores back **blows up FP 2–5×** (time 14→75, bank 4→64),
+because each part is individually loose and only the θ-thresholded weighted sum suppresses negatives that trip
+one gate. (Exception: `government`, θ=0, *is* an OR.) So the α-sum head + tuned θ is **load-bearing** — it lets
+greedy use loose per-part gates while keeping ensemble FP low by demanding agreement.
+
+### 15.5 No cross-class core sharing (`_xclass`)
+
+Cores are **pairwise distinct** (mean bit-Jaccard 0.064, max 0.17 time/world; overlaps are semantically
+sensible — physics/philosophy 0.14). No two classes share a core, so there is **no core-level dedup to build**.
+But **42% of core-bit slots are reused across classes** (Σ19844 → 11427 unique) — a **bit-level shared
+vocabulary** is the only compression lever, and it grows with the number of classes (a storage optimization,
+not a semantic one). The pipeline is strictly per-class (`fitClass`/`fitClassGreedy` + `parallelFit` fan-out,
+no cross-class communication).
+
+### 15.6 Verdict
+
+**Greedy-OR (or its marginal twin) is the deployed fast path** — replicator-level accuracy (85/11 vs 84/12),
+~13× faster, α-free in the marginal form, and now *understood* rather than observed. It ties (not beats) the
+replicator; the replicator retains a slight edge (~3–5pp recall) on the hardest diffuse words at 13× the cost.
+The dead-end map above is the value: we know *why* nothing richer helps — the signal is marginal+disjunctive,
+the scaffold is load-bearing, the FP floor is intrinsic, and co-occurrence is not.

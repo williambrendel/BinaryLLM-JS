@@ -64,15 +64,6 @@ export const buildAffinity = (A, w, neg, opts = {}) => {
     emit(Math.min(pi, pj), Math.max(pi, pj), pairM(0, mPos[pi], mPos[pj], jn, nMinus.get(a) || 0, nMinus.get(b) || 0));
   }
 
-  // §1 AND-objective (opt-in): unary GATES edges instead of adding to them. g_b=max(0,u_b) (mandatory — signed u
-  // would let two anti-discriminative bits reinforce); M̃_ab = g_a·M_ab·g_b; linear term dropped (u→0). A bit failing
-  // the unary test contributes 0 regardless of edges (the AND), and common bits (u≈0) self-mask their edges (§1.4).
-  if (opts.andObjective) {
-    const g = new Float64Array(n); for (let p = 0; p < n; p++) g[p] = Math.max(0, u[p]);
-    for (let e = 0; e < Marr.length; e++) Marr[e] *= g[Iarr[e]] * g[Jarr[e]];
-    return { u: new Float64Array(n), edges: { i: Int32Array.from(Iarr), j: Int32Array.from(Jarr), m: Float64Array.from(Marr) }, idx, n, g };
-  }
-
   return { u, edges: { i: Int32Array.from(Iarr), j: Int32Array.from(Jarr), m: Float64Array.from(Marr) }, idx, n };
 };
 
