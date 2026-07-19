@@ -746,3 +746,16 @@ small-`d` binary part-dictionary (parts near-orthogonal ⇒ `W` near-full-rank);
 dictionary as a growing low-rank-plus-sparse add-on (re-measure at larger N to size it). The "10,000× signature
 coverage" is **sparsity over a shared vocabulary, not a small-rank factorization** — the compression is real
 (~550M–1B sparse nonzeros is the floor) but it is *sparsity*, not *low rank*.
+
+**Boolean-factorization `d` (finer than parts — sub-patterns; `_bool` probe).** Testing whether `W⁺=U∨V` has
+small `d` = the count of distinct *bit-signatures* (bits grouped by which classes use them). Result at N=800:
+`boolD=20265` over `uniqBits=21310` — **95%: nearly every bit has its own distinct class-signature.** `boolD`
+tracks the vocabulary, not a small constant; `shared` → 100% (every bit used by ≥2 classes) but `cov90` needs
+~10K chunks (≈half of `boolD`) — **no heavy tail of universal sub-bundles.** So the sharing is **maximally
+fine-grained: bits are shared, their class-memberships are near-unique, there are no recurring sub-patterns
+above the single bit.** `W⁺=U∨V` degenerates (`V`=the bits, `U`=sparse selection) ⇒ **no Boolean compression
+beyond sparsity.** Confirms: the only levers are the shared bit-vocabulary + per-class sparsity = SLOG.
+
+**Training tractability is separate and already solved:** `W⁺` is *counted*, not *fit* (SLOG — global `p⁻` one
+pass + per-class `p⁺_c` counts, `O(corpus)`), so the ~days-to-build-`W⁺` cost is gone **regardless of `d`.** The
+factorization was only ever a *storage* question, and storage bottoms out at sparse-over-shared-vocabulary.
