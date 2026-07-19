@@ -759,3 +759,58 @@ beyond sparsity.** Confirms: the only levers are the shared bit-vocabulary + per
 **Training tractability is separate and already solved:** `W⁺` is *counted*, not *fit* (SLOG — global `p⁻` one
 pass + per-class `p⁺_c` counts, `O(corpus)`), so the ~days-to-build-`W⁺` cost is gone **regardless of `d`.** The
 factorization was only ever a *storage* question, and storage bottoms out at sparse-over-shared-vocabulary.
+
+## 17. The `d×bits` embedding layer — rank, binarization, learnability `[PROTOTYPE]`
+
+The Phase-2 aspiration: the gate layer should be `d×bits` with `d << classes` (self-attention's hidden dim),
+not `classes×bits` (= one-vs-all). §16.1 found the **binarized discovered** `W` near-full-rank (parts
+near-orthogonal) ⇒ no small-`d`. That is correct *for the binary parts* but measures the wrong object for the
+embedding question. Four measurements this session refine it. Each gate is a **perceptron**: since `x` is binary,
+`|W⁺∧x|+b−|W⁻∧x|>t|x| ⇔ (W⁺−W⁻−t·𝟙)·x+b>0` — a ternary weight `(W⁺−W⁻)` minus a uniform shift `t`. At inference
+the two binary matrices must be kept (two integer popcounts); the collapse to one `W′` is only for analysis.
+
+### 17.1 The graded log-odds IS low-rank — the binarization is what kills it (`_rank`)
+Effective rank (participation ratio `(Σλ)²/Σλ²`) of the class×bit **log-odds** `U` (not the binary parts):
+`N=25→19.9 (80%)`, `100→46.9 (47%)`, `400→74.1 (19%)`, `800→82.2 (10%)` — growth exponent **collapses
+0.69→0.15**, effRank **saturates** ⇒ `d` ≈ **corpus constant ~hundreds**, not ∝classes. Raw `p⁺` effRank 2.3
+(just the frequency background). The `W⁺−W⁻` popcount cancellation zeros the shared bits and keeps only the
+near-orthogonal distinctive residual (§16.1) — that is what makes the *binary* `W` full-rank; the **graded**
+log-odds keeps the semi-shared bits (small nonzero log-odds) where the low-rank relatedness lives. §16.1's
+near-full-rank is a property of the binarization, not the signal.
+
+### 17.2 …but low-rank buys RECALL, not PRECISION (`_proj`)
+Project `U` to rank `d`, re-tune per-row θ, held rec/FP (N=200): `full 43.5/4.25`, `d=16 41.8/10.4`,
+`64 46.3/7.6`, `128 43.9/5.3`. Recall recovers at `d`≈16; FP only converges as `d`→128. **Relatedness/recall is
+low-rank (~16–32, corpus-constant); discrimination/precision rides the high-rank tail (∝classes).** Two
+orthogonal subspaces: the router factorizes, the discriminative gate does not — it compresses by *sparsity*.
+
+### 17.3 The binary gate WORKS — weight-quantization is free (`binaryGateBench`)
+Fully-binary signed popcount (log-odds quantized to ternary at margin `M`, `(t,b,M)` tuned **per row**) vs float
+SLOG, 40 words, real harness (full contexts capped 4000, 60k neg, 4-fold): **MEAN 73/17 = 73/17 — dead heat.**
+A prior prediction of 2–5× FP blow-up was **wrong** (it came from the uniform-OR *ensemble* result, a different
+object). Binarizing the *weights* on the *full sparse bit-set* is lossless; compressing the *rank* costs
+precision — orthogonal axes. So the discrimination gate can be **fully binary at inference** (two integer
+popcounts, no floats); low-`d` stays the router's job. (Greedy scored 86/49 there = tuning-mismatch artifact —
+it tunes θ internally, not against the eval `negS` — not a real regression; the fair pair is SLOG vs signedPop.)
+
+### 17.4 Learned gates DISCRIMINATE, not just route (`learnAtDBench`)
+Linear rank bounds only *linear* factorization of the *discovered* gate. **Learned** gates are nonlinear (`d`
+threshold units → up to `2^d` codes), so not rank-bound — this is why a transformer's `d`~thousands *computes*
+rather than routes. Prototype: `d` two-matrix gates trained by SGD (**soft train / hard binary deploy**:
+`h=step(W·x+b−t|x|>0)`) + a linear readout, N-way next-token over 40 words. A pure hard-STE forward **dead-zones**
+(nothing crosses the ternary threshold at cold start → all gates 0 → 4–6% acc); soft-train + symmetry-breaking
+init + momentum fixes it. **d=256: soft 30.0%, hard 28.0% (99% of the linear count-SLOG baseline 28.3%)**, gates
+naturally sparse (19 bits/gate). So learned `d` gates **match the per-class linear ceiling and deploy as lossless
+binary popcount.** Caveats: 40 classes + a weak hand-rolled SGD ⇒ this is a **lower bound**; the *magnitude* of
+the nonlinear advantage (and any `d << classes` compression) needs scale + depth to demonstrate, which a
+40-class single layer cannot.
+
+### 17.5 Architecture + the tractability claim, honestly bounded
+Two channels, now measured rather than postulated: a **low-`d` float router** (relatedness/recall, `d`≈16–32
+corpus-constant, learnable/factorizable) proposes a top-K neighborhood; a **sparse binary discrimination gate**
+(precision, high-rank, integer popcount) disambiguates within it. Training vs 1.1M one-vs-all: the shared gate
+layer is learned **once over the corpus** (`O(corpus×d)`), not `classes×fit` — and rare classes **borrow shared
+statistical strength** (impossible for isolated per-class fits). **But the 1.1M-wide readout is still learned**
+(sampled/hierarchical softmax): the *computational multiplication* is escaped and the long tail *softened*, the
+1.1M output itself is **not free** — every class still needs signal. Benches: `binaryGateBench.js`,
+`learnAtDBench.js`; `_rank`/`_proj` probes uncommitted (scratch).
