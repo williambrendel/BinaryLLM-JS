@@ -675,3 +675,40 @@ no cross-class communication).
 replicator; the replicator retains a slight edge (~3–5pp recall) on the hardest diffuse words at 13× the cost.
 The dead-end map above is the value: we know *why* nothing richer helps — the signal is marginal+disjunctive,
 the scaffold is load-bearing, the FP floor is intrinsic, and co-occurrence is not.
+
+## 16. SLOG — the Signed Log-Odds Gate (Phase-2 scaling path) `[PROTOTYPE]`
+
+At deployment scale (~1.1M target classes × 2–4 cores × ~500 bits ≈ **1B bit-parameters/layer** over a ~100K-bit
+signature ⇒ **~10,000× bit-reuse**), two problems appear that the per-class fit does not solve: **storage** and
+**training cost**. SLOG is the reframing that addresses both. `benchmark/phase1/logoddsBench.js`.
+
+**The gate.** Replace the per-class *density* gate with a per-class **signed log-odds** score over the signature:
+```
+u_c[b] = log( (p⁺_c[b]+α) / (p⁻[b]+α) )        # p⁻ GLOBAL (shared), p⁺_c per-class
+score(x) = Σ_{b∈x} u_c[b]  (+ background −p⁻ term for bits the class never saw)   # fire if > θ_c
+```
+This is naive Bayes with a bias/negative-threshold. It's the **system-level** dual of the density gate: shared
+bits cancel (`u≈0`), so the effective per-class vector is dense only in the class-*distinctive* bits — a **sparse
+signed matrix `U ∈ ℝ^{classes×bits}`** over a shared background. That factors (shared bit-basis / the §15.5 chunk
+dictionary × per-class coefficients + a global background bias), and the compression is driven by the reuse
+factor, so it tips from the canon's 10% toward >99% as classes → 1.1M.
+
+**Trained by COUNTING, not optimizing.** `p⁻` is one global corpus pass, shared across all classes; `p⁺_c` is a
+per-class count; `u_c` is read off. No replicator, no greedy peel — training is `O(corpus)`, embarrassingly
+parallel.
+
+**CV (canon 4-fold, `logoddsBench`).** SLOG-full **81/13** held vs greedy 85 (~4pp recall trade, the `usum`
+result). **The `−p⁻` background is validated: +3pp recall over positive-evidence-only** (bank 69→77, hydrogen
+72→78, government 77→82) — the explicit "not-other-class" signal recovers recall the pos-only gate loses.
+
+**Honest caveats.** (1) The tractability win did **not** materialize on the canon — greedy is *already* ~1s/class
+(the "1 min" was the replicator, which greedy already replaced), and both are data-pass-bound, so SLOG ties
+greedy on speed here; its edge (**global `p⁻` vs greedy's per-class `buildNegSet`** over a corpus-sized pool) is
+**untested at scale**. (2) SLOG cancels the scaffold that the density gate uses for coverage, hence the ~4pp
+recall cost — but the `−p⁻` term recovers part of it, and at 1.1M classes the greedy fit may be infeasible
+regardless, making the comparison "SLOG vs nothing."
+
+**Verdict / role:** SLOG is the **Phase-2 scaling representation** — the compressible, count-trainable, signed
+form of the gate — accepting ~4pp recall for a factorable 1B-parameter layer. The `−p⁻` "not-other-class" signal
+is a measured win to fold into whichever gate ships. Open: (a) stress the scale-speed claim with a huge neg pool;
+(b) the SLOG↔density hybrid (route diffuse/hard classes to greedy, count-train the concentrated majority).
