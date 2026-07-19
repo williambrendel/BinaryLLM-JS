@@ -712,3 +712,37 @@ regardless, making the comparison "SLOG vs nothing."
 form of the gate — accepting ~4pp recall for a factorable 1B-parameter layer. The `−p⁻` "not-other-class" signal
 is a measured win to fold into whichever gate ships. Open: (a) stress the scale-speed claim with a huge neg pool;
 (b) the SLOG↔density hybrid (route diffuse/hard classes to greedy, count-train the concentrated majority).
+
+### 16.1 The factorization GO/NO-GO — measured (fit greedy on 25→800 auto-selected classes)
+
+The Phase-2 architecture question: does the 1.1M-class layer `W=[p_i⁺−p_i⁻]` factor into a **small shared
+*part*-dictionary** (a low-rank `W≈U∘V`, `d`~thousands), or only into **sparse rows over a shared *bit*
+vocabulary** (SLOG)? Fit greedy on the top-N frequent words, tracked as N grows (`_dict2` probe):
+
+| N classes | #parts | unique bits | Σ\|core\| | **bit-reuse** | **cross-Jaccard** | dict@ε0.5 |
+|---|---|---|---|---|---|---|
+| 25 | 126 | 11232 | 33K | 2.97× | 0.016 | 100% distinct |
+| 100 | 497 | 16291 | 139K | 8.5× | 0.017 | 100% distinct |
+| 400 | 1948 | 19863 | 543K | 27× | 0.016 | 70% distinct |
+| 800 | 3902 | 21310 | 1.09M | **51×** | **0.017** | 82% distinct |
+
+- **Shared BIT-vocabulary: CONFIRMED (GO for SLOG).** Unique bits grow 11K→21K while classes grow 32× —
+  strongly sublinear, saturating (would be ~360K if class-specific). Reuse explodes 3×→51× and climbing;
+  extrapolates to the full ~100K signature and ~10,000× reuse at 1.1M — the pigeonhole/dimensional bound,
+  now *measured*. The layer genuinely lives on a bounded shared bit-vocabulary ⇒ SLOG (sparse per-class
+  log-odds over the shared basis) is the right, validated form.
+- **Small-`d` part-dictionary: NO-GO — parts are near-ORTHOGONAL.** `cross-Jaccard` stays **flat at 0.017**
+  even at 51× reuse. Parts are distinct *combinations* of the shared vocabulary, not shared *sub-patterns*.
+  Near-orthogonal rows ⇒ `W` is **nearly full-rank (~signature dim), not low-rank `d`~thousands**. This
+  **corrects the Phase-2-doc conflation**: phase-1's "heavy part overlap" is *within-class* (bank 94%; and
+  greedy peels ⇒ within-class Jaccard **0.000**), NOT *cross-class* (0.017). The factorization is
+  shared-basis+sparse, **not** low-rank.
+- **Low-rank-PLUS-sparse bonus (grows with scale).** `dict@ε0.5` drops 100%→70–82% distinct at N≥400 — a
+  *growing minority* (~25% by N=800, up from 0%) of recurring near-duplicate parts atop the distinct
+  residual. A recurring-part dictionary is a real, scaling *add-on*, not the foundation.
+
+**Phase-2 verdict:** build the **SLOG sparse-over-shared-vocabulary** layer (validated); do **not** expect a
+small-`d` binary part-dictionary (parts near-orthogonal ⇒ `W` near-full-rank); keep the recurring-part
+dictionary as a growing low-rank-plus-sparse add-on (re-measure at larger N to size it). The "10,000× signature
+coverage" is **sparsity over a shared vocabulary, not a small-rank factorization** — the compression is real
+(~550M–1B sparse nonzeros is the floor) but it is *sparsity*, not *low rank*.
