@@ -814,3 +814,42 @@ statistical strength** (impossible for isolated per-class fits). **But the 1.1M-
 (sampled/hierarchical softmax): the *computational multiplication* is escaped and the long tail *softened*, the
 1.1M output itself is **not free** — every class still needs signal. Benches: `binaryGateBench.js`,
 `learnAtDBench.js`; `_rank`/`_proj` probes uncommitted (scratch).
+
+## 18. Gates as hyperplanes — the `d`-gate code, and how many you need `[PROTOTYPE]`
+
+Design-session synthesis (all probes below uncommitted/scratch; N=100 real causal `L`-band signatures unless noted;
+`full SLOG` = one counted log-odds gate per class = the accuracy ceiling here, **7.1%** at 100-way).
+
+**Each gate is a quantized hyperplane.** Since `x` is binary, `|p⁺∧x|+b−|p⁻∧x|>t·|x|` ⇔ `(p⁺−p⁻−t·𝟙)·x + b > 0`
+= `w·x+b>0`. So a gate is a **hyperplane**: normal `w=(p⁺−p⁻)−t·𝟙` (direction `p⁺→p⁻` tilted along the all-ones
+axis by the `t·|x|` length-normalization), offset `b`. Component-wise `w_i∈{1−t, −t, −1−t}` — a **ternary `{+1,0,−1}`
+direction shifted by `−t`**; shared bits (`i∈both`) cancel to `−t`. `d` gates = a hyperplane arrangement carving
+context space into ≤`2^d` **regions**; the code = which side of each; the goal = pure regions. Tree / oblivious /
+global-boosted gates are just *different strategies for placing the `d` hyperplanes*.
+
+**Building the `d`-gate code — what works (measured):**
+- **SLOG (one gate/class):** the ceiling (7.1% @ 100-way). Everything below compresses `d<classes` and loses some.
+- **Clustering / replicator / bipartite ECOC (bundle SLOGs by relatedness):** FAIL — relatedness-clustering puts
+  *similar* classes on *identical* codes → collisions → ≤42% of SLOG. Discriminative assignment is required.
+- **Purity decision-tree → gates:** the winner. Single-bit Gini splits, each leaf a **strict conjunction** gate
+  (`p⁺`=accept-branch bits, `p⁻`=reject-branch bits) reproduces the tree **exactly** (100% agreement) at **6.2% =
+  87% of SLOG, 2.2×**. A leaf region is a box-corner = a single half-space, so one popcount gate carries it exactly.
+- **Two-bit splits (`b_L`/`b_R`, balanced `p⁺`/`p⁻`):** better *tree* (6.7% = 94% of SLOG, no degenerate one-sided
+  leaves) but the flattened single popcount only reproduces it **approximately** — a leaf is now a *polytope*
+  (intersection of half-spaces), not one half-space. **Untuned** flatten = 47% agreement; **`(t,b)` tuned per leaf =
+  85% agreement, 6.3% = 89% of SLOG.** So OR-along-the-path ≈ keep-separate: *exact* for single-bit, ~85% for two-bit.
+- **min-purity split is WEAKER than Gini-average** (3.4% vs 6.2%): fighting the worst child yields balanced-but-weak
+  splits. Minimax is the right *growth priority* (which leaf/region to deepen), not the right *split score*.
+- **Global / oblivious gates (one split for everyone, layer-wise):** compact & non-redundant by construction (no
+  DAG needed) but **saturate** — 6 gates→56%, 8→58% of SLOG, then flat, because one global cut can't serve all the
+  diverse cells. Full trees escape via per-cell splits (94%) at the cost of subtree **redundancy** (a forest
+  *multiplies* redundancy; only a **DAG** shares gates).
+
+**How many gates — size to the class count, don't maximize.** `d` hyperplanes make ≤`2^d` regions; you want *just
+enough* regions for class purity. Sweeping global gates at 100-way: `d=8`→4.5%, `24`→4.0%, `48`→3.6%, `120`→3.4% —
+held accuracy **drops** as `d` grows (24K regions over 40K contexts ≈ 2 pts/region = memorization). So `~10K gates`
+is the order for **1.1M classes**; **for ~100 classes a few tens suffice** and more overfit. Corollary open problems
+for the real (1.1M) build: **coverage-aware split sizing** (2-bit splits overfit — contexts with neither bit fall
+through; grow the bit-set until it *covers* the node) and **DAG gate-sharing** (reuse a split only where it gains,
+vs forcing it on all cells or replicating it per subtree). Scratch benches: `_strict`/`_2side`/`_mp`/`_pw`/`_tune`/
+`_obliv`/`_scale` (not committed).
