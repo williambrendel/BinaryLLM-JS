@@ -33,6 +33,7 @@ const DLIST = (process.env.DLIST || "16,64,256").split(",").map(Number);
 const EPOCHS = Number(process.env.EPOCHS || 12), LR = Number(process.env.LR || 0.1), BATCH = Number(process.env.BATCH || 64);
 const CLIP = Number(process.env.CLIP || 1.0);
 const WINIT = Number(process.env.WINIT || 0.05), MOM = Number(process.env.MOM || 0.9);
+const SLOGSCALE = Number(process.env.SLOGSCALE || 0.3);
 
 const [dictArg, corpusArg] = process.argv.slice(2);
 const dict = loadDict(dictArg); const F = dict.size(), DIM = 3 * F;
@@ -73,12 +74,18 @@ const slogAcc = (() => { let ok = 0; for (let i = 0; i < HX.length; i++) { let b
 
 // ---- learn d gates: soft train (float W + sigmoid), hard eval (step gate = deployable two-matrix form) ----
 const sig = (z) => 1 / (1 + Math.exp(-z));
-function trainD(d, seed) {
+function trainD(d, seed, opts = {}) {
+  const { initSlog = false, freeze = false, identityReadout = false } = opts;
   let rng = seed >>> 0; const rnd = () => ((rng = (rng * 1664525 + 1013904223) >>> 0) / 4294967296 - 0.5);
-  const W = new Float32Array(d * V); for (let k = 0; k < W.length; k++) W[k] = rnd() * WINIT;
+  const W = new Float32Array(d * V);
+  if (initSlog) { for (let j = 0; j < d; j++) { const u = U[j % N], base = j * V; for (let k = 0; k < V; k++) { let v = u[k] * SLOGSCALE; if (v > CLIP) v = CLIP; else if (v < -CLIP) v = -CLIP; W[base + k] = v; } } }
+  else { for (let k = 0; k < W.length; k++) W[k] = rnd() * WINIT; }
   const tG = new Float32Array(d), bG = new Float32Array(d);
-  const E = new Float32Array(N * d); for (let k = 0; k < E.length; k++) E[k] = rnd() * 0.2;
+  const E = new Float32Array(N * d);
+  if (identityReadout) { for (let k = 0; k < E.length; k++) E[k] = rnd() * 0.05; for (let j = 0; j < d; j++) E[(j % N) * d + j] += 1; }
+  else { for (let k = 0; k < E.length; k++) E[k] = rnd() * 0.2; }
   const cb = new Float32Array(N);
+  if (freeze) { const sx = TX.slice(0, 2000); for (let j = 0; j < d; j++) { const base = j * V; const rs = sx.map((x) => { let a = 0; for (const p of x) a += W[base + p]; return a / x.length; }).sort((a, b) => a - b); tG[j] = rs[rs.length >> 1]; } }
   const h = new Float32Array(d), z = new Float32Array(d), logit = new Float32Array(N);
   const dW = new Float32Array(d * V), vW = new Float32Array(d * V), mE = new Float32Array(N * d);
   const order = Int32Array.from({ length: TX.length }, (_, i) => i);
@@ -94,12 +101,12 @@ function trainD(d, seed) {
         let mx = -Infinity; for (let c = 0; c < N; c++) { let s = cb[c]; const eb = c * d; for (let j = 0; j < d; j++) s += E[eb + j] * h[j]; logit[c] = s; if (s > mx) mx = s; }
         let Z = 0; for (let c = 0; c < N; c++) { logit[c] = Math.exp(logit[c] - mx); Z += logit[c]; }
         for (let c = 0; c < N; c++) { const g = logit[c] / Z - (c === y ? 1 : 0); dcb[c] += g; const eb = c * d; for (let j = 0; j < d; j++) dE[eb + j] += g * h[j]; }
-        for (let j = 0; j < d; j++) { let dh = 0; for (let c = 0; c < N; c++) dh += (logit[c] / Z - (c === y ? 1 : 0)) * E[c * d + j];
+        if (!freeze) for (let j = 0; j < d; j++) { let dh = 0; for (let c = 0; c < N; c++) dh += (logit[c] / Z - (c === y ? 1 : 0)) * E[c * d + j];
           const dz = dh * h[j] * (1 - h[j]); const base = j * V;
           for (let p = 0; p < L; p++) { const k = base + x[p]; if (dW[k] === 0) touched.push(k); dW[k] += dz; } db[j] += dz; dt[j] -= dz * L; }
       }
-      for (const k of touched) { vW[k] = MOM * vW[k] + dW[k] / nb; let v = W[k] - lr * vW[k]; if (v > CLIP) v = CLIP; else if (v < -CLIP) v = -CLIP; W[k] = v; dW[k] = 0; }
-      for (let j = 0; j < d; j++) { tG[j] -= lr * dt[j] / nb; bG[j] -= lr * db[j] / nb; }
+      if (!freeze) { for (const k of touched) { vW[k] = MOM * vW[k] + dW[k] / nb; let v = W[k] - lr * vW[k]; if (v > CLIP) v = CLIP; else if (v < -CLIP) v = -CLIP; W[k] = v; dW[k] = 0; }
+        for (let j = 0; j < d; j++) { tG[j] -= lr * dt[j] / nb; bG[j] -= lr * db[j] / nb; } }
       for (let k = 0; k < E.length; k++) { mE[k] = MOM * mE[k] + dE[k] / nb; E[k] -= lr * mE[k]; }
       for (let c = 0; c < N; c++) cb[c] -= lr * dcb[c] / nb;
     }
@@ -113,8 +120,14 @@ function trainD(d, seed) {
 }
 
 const w = process.stdout;
-w.write(`# [PROTOTYPE] learn d gates by SGD (soft train / HARD deploy: h=step(W·x+b−t|x|>0)) | ${N} target words | N-way next-token acc\n`);
-w.write(`# random=${(100 / N).toFixed(1)}%  ·  discovered per-class SLOG argmax (N one-vs-all gates) = ${(100 * slogAcc).toFixed(1)}%\n`);
-w.write(`   d     soft-acc  hard-acc  hard/SLOG  |W|>.3/gate\n`);
-for (const d of DLIST) { const r = trainD(d, 12345 + d); w.write(`  ${String(d).padStart(3)}    ${(100 * r.soft).toFixed(1).padStart(5)}%   ${(100 * r.hard).toFixed(1).padStart(5)}%    ${(100 * r.hard / slogAcc).toFixed(0).padStart(4)}%     ${r.wpGate.toFixed(0)}\n`); }
-w.write(`# read: hard-acc rising with d and passing SLOG(100%) ⇒ learned nonlinear gates DISCRIMINATE, not just route.\n`);
+w.write(`# [PROTOTYPE] gate-training methods vs the counted baseline | ${N} target words | N-way next-token held acc\n`);
+w.write(`# random-guess=${(100 / N).toFixed(1)}%  ·  SLOG-linear argmax (counted, no training) = ${(100 * slogAcc).toFixed(1)}%\n`);
+w.write(`  method                         d     soft-acc  hard-acc  vs-SLOG  |W|>.3/gate\n`);
+const row = (name, d, r) => w.write(`  ${name.padEnd(28)}  ${String(d).padStart(3)}    ${(100 * r.soft).toFixed(1).padStart(5)}%   ${(100 * r.hard).toFixed(1).padStart(5)}%   ${((100 * r.hard / slogAcc) - 100 >= 0 ? "+" : "") + ((100 * r.hard / slogAcc) - 100).toFixed(0).padStart(3)}%     ${r.wpGate.toFixed(0)}\n`);
+// Q1: SLOG-init GD — starts AT the counted solution (d=N, identity readout); does gradient climb past it?
+row("SLOG-init + GD (Q1)", N, trainD(N, 999, { initSlog: true, identityReadout: true }));
+// Q3: frozen random gates + convex readout (ELM) — threshold nonlinearity for free, no gate training
+row("random-frozen ELM (Q3)", 256, trainD(256, 999, { freeze: true }));
+// reference: plain random-init GD
+row("random-init + GD", 256, trainD(256, 12345 + 256, {}));
+w.write(`# read: SLOG-init>SLOG ⇒ GD earns its cost; ELM≈SLOG ⇒ threshold nonlinearity is ~free; both≈SLOG ⇒ counting suffices at this scale.\n`);
